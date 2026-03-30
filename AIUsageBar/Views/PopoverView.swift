@@ -35,7 +35,7 @@ struct PopoverView: View {
                     .foregroundColor(.white)
             }
 
-            Text("Claude Pro")
+            Text("AI Usage")
                 .font(.system(size: 14, weight: .semibold))
 
             Spacer()
@@ -63,9 +63,9 @@ struct PopoverView: View {
     // MARK: - Main Content
     @ViewBuilder
     private var contentView: some View {
-        if viewModel.isLoading && viewModel.usageData == nil {
+        if viewModel.isLoading && !viewModel.hasAnyUsageData {
             loadingView
-        } else if let error = viewModel.errorMessage, viewModel.usageData == nil {
+        } else if let error = viewModel.errorMessage, !viewModel.hasAnyUsageData {
             errorView(message: error)
         } else {
             usageView
@@ -110,36 +110,93 @@ struct PopoverView: View {
     // MARK: - Usage Rows
     private var usageView: some View {
         VStack(spacing: 16) {
-            // 5-hour Session
-            UsageProgressRow(
-                title:       "Current Session",
-                subtitle:    "5 小時視窗",
-                utilization: viewModel.sessionUtilization,
-                resetInfo:   viewModel.sessionResetText
-            )
+            if viewModel.usageData != nil {
+                sectionHeader("Claude")
 
-            Divider()
-
-            // 7-day All Models
-            UsageProgressRow(
-                title:       "Weekly · All Models",
-                subtitle:    "7 天滾動視窗",
-                utilization: viewModel.weeklyUtilization,
-                resetInfo:   viewModel.weeklyResetText
-            )
-
-            // Sonnet（只在有資料時顯示）
-            if viewModel.shouldShowSonnet {
-                Divider()
                 UsageProgressRow(
-                    title:       "Weekly · Sonnet",
-                    subtitle:    "7 天滾動視窗",
-                    utilization: viewModel.sonnetUtilization,
-                    resetInfo:   viewModel.sonnetResetText
+                    title:       "Current Session",
+                    subtitle:    "5 小時用量",
+                    utilization: viewModel.sessionUtilization,
+                    resetInfo:   viewModel.sessionResetText
                 )
+
+                Divider()
+
+                UsageProgressRow(
+                    title:       "Weekly",
+                    subtitle:    "7 天用量",
+                    utilization: viewModel.weeklyUtilization,
+                    resetInfo:   viewModel.weeklyResetText
+                )
+
+                // Sonnet（只在有資料時顯示）
+                if viewModel.shouldShowSonnet {
+                    Divider()
+                    UsageProgressRow(
+                        title:       "Weekly · Sonnet",
+                        subtitle:    "7 天用量",
+                        utilization: viewModel.sonnetUtilization,
+                        resetInfo:   viewModel.sonnetResetText
+                    )
+                }
+            }
+
+            if viewModel.shouldShowCodex {
+                if viewModel.usageData != nil {
+                    Divider()
+                }
+
+                sectionHeader("Codex")
+
+                UsageProgressRow(
+                    title:       "Current Session",
+                    subtitle:    "5 小時用量",
+                    utilization: viewModel.codexSessionUtilization,
+                    resetInfo:   viewModel.codexSessionResetText
+                )
+
+                Divider()
+
+                UsageProgressRow(
+                    title:       "Weekly",
+                    subtitle:    "7 天用量",
+                    utilization: viewModel.codexWeeklyUtilization,
+                    resetInfo:   viewModel.codexWeeklyResetText
+                )
+            }
+
+            if let codexError = viewModel.codexErrorMessage, !viewModel.shouldShowCodex {
+                if viewModel.usageData != nil {
+                    Divider()
+                }
+                sectionHeader("Codex")
+                Text(codexError)
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
         .padding(16)
+    }
+
+    private func sectionHeader(_ title: String) -> some View {
+        HStack(spacing: 6) {
+            if title == "Claude" {
+                Image("ClaudeIcon")
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 14, height: 14)
+            } else if title == "Codex" {
+                Image("CodexIcon")
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 14, height: 14)
+            }
+            Text(title)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundColor(.secondary)
+            Spacer()
+        }
     }
 
     // MARK: - Footer

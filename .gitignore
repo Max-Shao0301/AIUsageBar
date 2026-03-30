@@ -15,6 +15,20 @@ DerivedData/
 *.dSYM.zip
 *.dSYM
 
+# Xcode Build Cache / Modules
+*.pcm
+*.pcm.lock
+*.o
+*.d
+*.dia
+*.swp
+*.lock
+*.swiftmodule
+*.swiftdoc
+*.swiftsourceinfo
+*.swiftinterface
+*.sdkstatcache
+
 # macOS
 .DS_Store
 .AppleDouble
@@ -22,3 +36,15 @@ DerivedData/
 
 # Build
 build/
+Build/
+*.build/
+
+# SPM
+.swiftpm/
+.build/
+Packages/
+
+# Pods (if any)
+Pods/
+Podfile.lock
+.deriveddata/
