@@ -5,6 +5,7 @@ import Combine
 final class StatusBarController {
 
     // MARK: - Properties
+    private let statusSymbolName = "brain.head.profile"
     private let statusItem: NSStatusItem
     private let popover:    NSPopover
     private let viewModel:  UsageViewModel
@@ -13,7 +14,7 @@ final class StatusBarController {
     // MARK: - Init
     init() {
         viewModel  = UsageViewModel()
-        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         popover    = NSPopover()
 
         setupStatusItem()
@@ -24,10 +25,11 @@ final class StatusBarController {
     // MARK: - Setup: Status Item
     private func setupStatusItem() {
         guard let button = statusItem.button else { return }
-        button.image              = NSImage(systemSymbolName: "sparkle",
-                                            accessibilityDescription: "Claude Usage")
+        button.image              = NSImage(systemSymbolName: statusSymbolName,
+                                            accessibilityDescription: "AI Usage")
         button.image?.isTemplate  = true
-        button.imagePosition      = .imageLeft
+        button.imagePosition      = .imageOnly
+        button.title              = ""
         button.action             = #selector(handleClick(_:))
         button.target             = self
         button.sendAction(on: [.leftMouseUp, .rightMouseUp])
@@ -49,6 +51,11 @@ final class StatusBarController {
             .sink { [weak self] _ in self?.updateButtonLabel() }
             .store(in: &cancellables)
 
+        viewModel.$codexUsageData
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.updateButtonLabel() }
+            .store(in: &cancellables)
+
         viewModel.$isLoading
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in self?.updateButtonLabel() }
@@ -57,24 +64,10 @@ final class StatusBarController {
 
     private func updateButtonLabel() {
         guard let button = statusItem.button else { return }
-        if viewModel.isLoading && viewModel.usageData == nil {
-            button.title = " ..."
-        } else if viewModel.usageData != nil {
-            let pct = Int(viewModel.maxUtilization)
-            button.title = " \(pct)%"
-
-            // 高用量時換警告色 icon
-            if pct >= 80 {
-                button.image = NSImage(systemSymbolName: "exclamationmark.circle",
-                                       accessibilityDescription: "High Usage")
-            } else {
-                button.image = NSImage(systemSymbolName: "sparkle",
-                                       accessibilityDescription: "Claude Usage")
-            }
-            button.image?.isTemplate = true
-        } else {
-            button.title = ""
-        }
+        button.title = ""
+        button.image = NSImage(systemSymbolName: statusSymbolName,
+                               accessibilityDescription: "AI Usage")
+        button.image?.isTemplate = true
     }
 
     // MARK: - Click Handler
@@ -108,8 +101,10 @@ final class StatusBarController {
         menu.addItem(.separator())
 
         let quitItem = NSMenuItem(title: "結束 AIUsageBar",
-                                  action: #selector(NSApplication.terminate(_:)),
+                                  action: #selector(doQuit),
                                   keyEquivalent: "q")
+        quitItem.target = self
+        quitItem.image = nil
         menu.addItem(quitItem)
 
         statusItem.menu = menu
@@ -119,5 +114,9 @@ final class StatusBarController {
 
     @objc private func doRefresh() {
         viewModel.refresh()
+    }
+
+    @objc private func doQuit() {
+        NSApp.terminate(nil)
     }
 }
