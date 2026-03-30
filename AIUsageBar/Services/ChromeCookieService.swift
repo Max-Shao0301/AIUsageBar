@@ -124,7 +124,6 @@ final class ChromeCookieService {
             throw CookieError.decryptionFailed("session key UTF-8 解碼失敗")
         }
 
-        print("✅ [ChromeCookieService] Session key found, length=\(sessionKey.count)")
         return sessionKey
     }
 
@@ -200,69 +199,6 @@ final class ChromeCookieService {
         return Data(out.prefix(outLen))
     }
 
-    // MARK: - (舊介面，保留相容性)
-    private func decryptAES(_ data: Data, key: Data) throws -> String {
-        // 確認 v10 / v11 前綴
-        let prefixBytes = data.prefix(3)
-        let prefix = String(bytes: prefixBytes, encoding: .utf8) ?? ""
-
-        #if DEBUG
-        print("🔐 [ChromeCookieService] encrypted_value total=\(data.count) bytes, prefix=\(prefix)")
-        print("🔐 first 6 bytes hex: \(data.prefix(6).map { String(format:"%02x",$0) }.joined(separator:" "))")
-        #endif
-
-        guard prefix == "v10" || prefix == "v11" else {
-            throw CookieError.decryptionFailed("未知前綴: \(prefix) (\(prefixBytes.map{String(format:"%02x",$0)}.joined()))")
-        }
-        let cipher = data.dropFirst(3)
-        let iv     = Data(repeating: 0x20, count: kCCBlockSizeAES128)  // 16 個空格
-
-        var out = [UInt8](repeating: 0, count: cipher.count + kCCBlockSizeAES128)
-        var outLen = 0
-
-        let status = key.withUnsafeBytes { keyPtr in
-            iv.withUnsafeBytes { ivPtr in
-                cipher.withUnsafeBytes { cipherPtr in
-                    CCCrypt(
-                        CCOperation(kCCDecrypt),
-                        CCAlgorithm(kCCAlgorithmAES128),
-                        CCOptions(kCCOptionPKCS7Padding),
-                        keyPtr.baseAddress, key.count,
-                        ivPtr.baseAddress,
-                        cipherPtr.baseAddress, cipher.count,
-                        &out, out.count,
-                        &outLen
-                    )
-                }
-            }
-        }
-
-        #if DEBUG
-        print("🔐 CCCrypt status=\(status), outLen=\(outLen)")
-        if outLen > 0 {
-            let firstBytes = Array(out.prefix(min(outLen, 20)))
-            print("🔐 decrypted hex: \(firstBytes.map{String(format:"%02x",$0)}.joined(separator:" "))")
-        }
-        #endif
-
-        guard status == kCCSuccess else {
-            throw CookieError.decryptionFailed("CCCrypt 失敗 status=\(status)")
-        }
-
-        let decryptedBytes = Array(out.prefix(outLen))
-
-        // 嘗試 UTF-8
-        if let result = String(bytes: decryptedBytes, encoding: .utf8) {
-            return result
-        }
-        // 嘗試移除尾部 null bytes 後再解碼
-        let trimmed = decryptedBytes.filter { $0 != 0 }
-        if let result = String(bytes: trimmed, encoding: .utf8) {
-            return result
-        }
-
-        throw CookieError.decryptionFailed("UTF-8 解碼失敗，decrypted hex=\(decryptedBytes.prefix(16).map{String(format:"%02x",$0)}.joined())")
-    }
 }
 
 // MARK: - Errors

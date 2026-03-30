@@ -36,7 +36,6 @@ final class ClaudeService {
         let sessionKey: String
         do {
             sessionKey = try ChromeCookieService.shared.getSessionKey()
-            print("✅ [ClaudeService] Session key obtained (length: \(sessionKey.count))")
         } catch {
             throw ClaudeServiceError.noCredentials(error.localizedDescription)
         }
@@ -48,7 +47,6 @@ final class ClaudeService {
         } else {
             orgId = try await fetchOrgId(sessionKey: sessionKey)
             cachedOrgId = orgId
-            print("✅ [ClaudeService] Org ID: \(orgId)")
         }
 
         // Step 3：查詢使用量
