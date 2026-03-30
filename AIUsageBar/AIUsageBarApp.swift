@@ -1,17 +1,11 @@
-//
-//  AIUsageBarApp.swift
-//  AIUsageBar
-//
-//  Created by Max Shao on 2026/3/30.
-//
-
 import SwiftUI
 
 @main
 struct AIUsageBarApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
+
     var body: some Scene {
-        WindowGroup {
-            ContentView()
-        }
+        // 不需要主視窗，只有 Menu Bar
+        Settings { EmptyView() }
     }
 }
