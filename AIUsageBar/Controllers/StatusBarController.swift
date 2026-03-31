@@ -141,7 +141,7 @@ final class StatusBarController {
             }
         } catch {
             #if DEBUG
-            print("⚠️ [LaunchAtLogin] Configuration failed: \(error.localizedDescription)")
+            print("[LaunchAtLogin] Configuration failed: \(error.localizedDescription)")
             #endif
         }
     }

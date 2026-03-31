@@ -40,22 +40,22 @@ final class ClaudeService {
         if let credentials = try? KeychainService.shared.readCredentials() {
             do {
                 let result = try await fetchUsageWithOAuth(credentials: credentials)
-                print("✅ [ClaudeService] 使用 Claude Code OAuth token")
+                print("[ClaudeService] 使用 Claude Code OAuth token")
                 return result
             } catch ClaudeServiceError.unauthorized {
-                print("⚠️ [ClaudeService] OAuth token 無效，降級使用 Claude Desktop Cookie")
+                print("[ClaudeService] OAuth token 無效，降級使用 Claude Desktop Cookie")
             } catch ClaudeServiceError.rateLimited {
-                print("⚠️ [ClaudeService] OAuth 頻率限制，降級使用 Claude Desktop Cookie")
+                print("[ClaudeService] OAuth 頻率限制，降級使用 Claude Desktop Cookie")
             } catch {
-                print("⚠️ [ClaudeService] OAuth 失敗（\(error.localizedDescription)），降級使用 Claude Desktop Cookie")
+                print("[ClaudeService] OAuth 失敗（\(error.localizedDescription)），降級使用 Claude Desktop Cookie")
             }
         } else {
-            print("ℹ️ [ClaudeService] 找不到 Claude Code credentials，使用 Claude Desktop Cookie")
+            print("[ClaudeService] 找不到 Claude Code credentials，使用 Claude Desktop Cookie")
         }
 
         // Strategy 2: Claude Desktop session cookie (fallback)
         let result = try await fetchUsageWithCookie()
-        print("✅ [ClaudeService] 使用 Claude Desktop Cookie")
+        print("[ClaudeService] 使用 Claude Desktop Cookie")
         return result
     }
 
