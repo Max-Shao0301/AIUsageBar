@@ -95,8 +95,8 @@ AIUsageBar/
 
 ## 安裝方式
 
--解壓縮後將AIUsageBar.app 移至applications 
--打開APP會看到 "無法打開，因為無法驗證開法者" 
--至 系統設定 → 隱私權與安全性 往下會看到AIUsageAPP → 仍要開啟
+   -解壓縮後將AIUsageBar.app 移至applications 
+   -打開APP會看到 "無法打開，因為無法驗證開法者" 
+   -至 系統設定 → 隱私權與安全性 往下會看到AIUsageAPP → 仍要開啟
 
 
