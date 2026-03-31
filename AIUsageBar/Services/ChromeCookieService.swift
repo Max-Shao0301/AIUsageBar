@@ -3,12 +3,12 @@ import Security
 import CommonCrypto
 import SQLite3
 
-// MARK: - Chromium Cookie Decryptor（macOS）
-// Claude Desktop App 是 Electron（Chromium）App
-// macOS 上的 Cookie 加密流程：
-//   1. 在 Keychain 存一組隨機 password（服務名稱：Claude Safe Storage）
+// MARK: - Chromium Cookie Decryptor (macOS)
+// Claude Desktop App is an Electron (Chromium) App
+// Cookie encryption flow on macOS:
+//   1. A random password is stored in Keychain (service name: Claude Safe Storage)
 //   2. PBKDF2(password, salt="saltysalt", iter=1003) → 16-byte AES Key
-//   3. AES-128-CBC(key, iv=" "*16) 加密 cookie value，前綴 "v10" 或 "v11"
+//   3. AES-128-CBC(key, iv=" "*16) encrypts the cookie value, prefixed with "v10" or "v11"
 
 final class ChromeCookieService {
     static let shared = ChromeCookieService()
@@ -23,7 +23,7 @@ final class ChromeCookieService {
         return try readAndDecryptSessionKey(rawPasswordData: rawPasswordData)
     }
 
-    // MARK: - Step 1：從 Keychain 取得 Safe Storage 原始 bytes
+    // MARK: - Step 1: Retrieve Safe Storage raw bytes from Keychain
     private func safeStorageRawData() throws -> Data {
         let query: [CFString: Any] = [
             kSecClass:       kSecClassGenericPassword,
@@ -43,12 +43,12 @@ final class ChromeCookieService {
         return data
     }
 
-    // MARK: - Step 2：多策略推導 AES Key
+    // MARK: - Step 2: Derive AES Key using multiple strategies
     private func deriveKey(from rawData: Data, strategy: KeyStrategy) -> Data? {
         let salt = Array("saltysalt".utf8)
         switch strategy {
 
-        // 策略 A：標準 Chromium PBKDF2-SHA1，1003 iterations，16-byte key
+        // Strategy A: Standard Chromium PBKDF2-SHA1, 1003 iterations, 16-byte key
         case .pbkdf2SHA1_1003_16:
             var derivedKey = [UInt8](repeating: 0, count: 16)
             let result = rawData.withUnsafeBytes { pwdPtr in
@@ -62,7 +62,7 @@ final class ChromeCookieService {
             }
             return result == kCCSuccess ? Data(derivedKey) : nil
 
-        // 策略 B：PBKDF2-SHA1，1 iteration（某些 Electron 版本）
+        // Strategy B: PBKDF2-SHA1, 1 iteration (used in some Electron versions)
         case .pbkdf2SHA1_1_16:
             var derivedKey = [UInt8](repeating: 0, count: 16)
             let result = rawData.withUnsafeBytes { pwdPtr in
@@ -76,12 +76,12 @@ final class ChromeCookieService {
             }
             return result == kCCSuccess ? Data(derivedKey) : nil
 
-        // 策略 C：直接用 Keychain 的前 16 bytes 當 AES Key（跳過 PBKDF2）
+        // Strategy C: Use the first 16 bytes of the Keychain data directly as AES Key (skip PBKDF2)
         case .rawKeyFirst16:
             guard rawData.count >= 16 else { return nil }
             return rawData.prefix(16)
 
-        // 策略 D：SHA256 hash 前 16 bytes
+        // Strategy D: First 16 bytes of SHA256 hash
         case .sha256First16:
             var hash = [UInt8](repeating: 0, count: Int(CC_SHA256_DIGEST_LENGTH))
             rawData.withUnsafeBytes { ptr in
@@ -98,22 +98,22 @@ final class ChromeCookieService {
         case sha256First16
     }
 
-    // MARK: - Step 3：讀 SQLite + 多策略試解密
+    // MARK: - Step 3: Read SQLite + attempt decryption with multiple strategies
     private func readAndDecryptSessionKey(rawPasswordData: Data) throws -> String {
         let encryptedData = try readEncryptedSessionKey()
 
-        // PBKDF2 key（PKCS7 驗證正確）
+        // PBKDF2 key (PKCS7 padding verified correct)
         guard let pbkdf2Key = deriveKey(from: rawPasswordData, strategy: .pbkdf2SHA1_1003_16) else {
             throw CookieError.keyDerivationFailed
         }
 
-        // AES-128-CBC 解密（IV = spaces，key 已確認正確）
+        // AES-128-CBC decryption (IV = spaces, key confirmed correct)
         let iv = Data(repeating: 0x20, count: 16)
         guard let raw = tryCBCDecryptRaw(encryptedData.dropFirst(3), key: pbkdf2Key, iv: iv) else {
             throw CookieError.decryptionFailed("AES 解密失敗")
         }
 
-        // Cookie 前 32 bytes 是 binary header，session key 從 "sk-ant-" 開始
+        // The first 32 bytes of the cookie are a binary header; the session key starts at "sk-ant-"
         guard let markerData = "sk-ant-".data(using: .utf8),
               let range = raw.range(of: markerData) else {
             throw CookieError.decryptionFailed("找不到 sk-ant- 標記，decrypted=\(raw.count) bytes")
@@ -128,7 +128,7 @@ final class ChromeCookieService {
     }
 
     private func readEncryptedSessionKey() throws -> Data {
-        // 複製 DB 到暫存位置（避免 Chromium 的檔案鎖）
+        // Copy the DB to a temporary location (to avoid Chromium's file lock)
         let tempPath = NSTemporaryDirectory() + "aiu_claude_cookies.db"
         let src = URL(fileURLWithPath: cookieDBPath)
         let dst = URL(fileURLWithPath: tempPath)
@@ -170,12 +170,12 @@ final class ChromeCookieService {
         return Data(bytes: blobPtr, count: size)
     }
 
-    // MARK: - Step 4：AES-128-CBC 解密（帶驗證）
+    // MARK: - Step 4: AES-128-CBC decryption (with validation)
     private func tryCBCDecrypt(_ cipher: Data, key: Data, iv: Data) -> String? {
         guard let raw = tryCBCDecryptRaw(cipher, key: key, iv: iv) else { return nil }
-        // 嘗試 UTF-8
+        // Try UTF-8
         if let s = String(data: raw, encoding: .utf8), s.count > 10 { return s }
-        // 嘗試去除 null bytes
+        // Try stripping null bytes
         let trimmed = raw.filter { $0 != 0 }
         if let s = String(data: Data(trimmed), encoding: .utf8), s.count > 10 { return s }
         return nil

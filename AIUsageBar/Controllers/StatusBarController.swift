@@ -1,6 +1,7 @@
 import AppKit
 import SwiftUI
 import Combine
+import ServiceManagement
 
 final class StatusBarController {
 
@@ -44,7 +45,7 @@ final class StatusBarController {
         )
     }
 
-    // MARK: - Observe ViewModel → 更新 Menu Bar 文字
+    // MARK: - Observe ViewModel → Update Menu Bar Text
     private func observeViewModel() {
         viewModel.$usageData
             .receive(on: DispatchQueue.main)
@@ -98,6 +99,11 @@ final class StatusBarController {
         refreshItem.target = self
         menu.addItem(refreshItem)
 
+        let launchItem = NSMenuItem(title: "登入時自動啟動", action: #selector(toggleLaunchAtLogin), keyEquivalent: "")
+        launchItem.target = self
+        launchItem.state = isLaunchAtLoginEnabled ? .on : .off
+        menu.addItem(launchItem)
+
         menu.addItem(.separator())
 
         let quitItem = NSMenuItem(title: "結束 AIUsageBar",
@@ -118,5 +124,25 @@ final class StatusBarController {
 
     @objc private func doQuit() {
         NSApp.terminate(nil)
+    }
+
+    // MARK: - Launch at Login
+
+    private var isLaunchAtLoginEnabled: Bool {
+        SMAppService.mainApp.status == .enabled
+    }
+
+    @objc private func toggleLaunchAtLogin() {
+        do {
+            if isLaunchAtLoginEnabled {
+                try SMAppService.mainApp.unregister()
+            } else {
+                try SMAppService.mainApp.register()
+            }
+        } catch {
+            #if DEBUG
+            print("⚠️ [LaunchAtLogin] Configuration failed: \(error.localizedDescription)")
+            #endif
+        }
     }
 }

@@ -185,9 +185,9 @@ private extension AIUsageWidgetView {
             }
 
             if let s = entry.snapshot {
-                // 兩欄並排：Claude | Codex
+                // Two columns side by side: Claude | Codex
                 HStack(alignment: .top, spacing: 8) {
-                    // Claude 欄
+                    // Claude column
                     VStack(alignment: .leading, spacing: 4) {
                         HStack(spacing: 4) {
                             Image("ClaudeIcon")
@@ -205,7 +205,7 @@ private extension AIUsageWidgetView {
 
                     Divider()
 
-                    // Codex 欄
+                    // Codex column
                     VStack(alignment: .leading, spacing: 4) {
                         HStack(spacing: 4) {
                             Image("CodexIcon")

@@ -14,7 +14,7 @@ final class UsageViewModel: ObservableObject {
 
     // MARK: - Auto Refresh
     private var refreshTask: Task<Void, Never>?
-    private let autoRefreshInterval: TimeInterval = 300  // 5 分鐘
+    private let autoRefreshInterval: TimeInterval = 300  // 5 minutes
 
     // MARK: - Init
     init() {
@@ -26,12 +26,12 @@ final class UsageViewModel: ObservableObject {
         refreshTask?.cancel()
     }
 
-    // MARK: - Public: 手動觸發
+    // MARK: - Public: Manual Trigger
     func refresh() {
         Task { await fetchUsage() }
     }
 
-    // MARK: - Private: 取得資料
+    // MARK: - Private: Fetch Data
     private func fetchUsage() async {
         guard !isLoading else { return }
         isLoading = true
@@ -115,7 +115,7 @@ final class UsageViewModel: ObservableObject {
         }
     }
 
-    // MARK: - Private: 背景定時更新
+    // MARK: - Private: Background Auto-Refresh
     private func startAutoRefresh() {
         refreshTask = Task { [weak self] in
             while !Task.isCancelled {
@@ -126,7 +126,7 @@ final class UsageViewModel: ObservableObject {
         }
     }
 
-    // MARK: - Computed: UI 用的便利屬性
+    // MARK: - Computed: Convenience properties for UI
 
     var hasAnyUsageData: Bool {
         usageData != nil || codexUsageData != nil
@@ -148,19 +148,19 @@ final class UsageViewModel: ObservableObject {
     var codexSessionResetText: String { codexUsageData?.fiveHour?.timeUntilResetText ?? "--" }
     var codexWeeklyResetText: String  { codexUsageData?.sevenDay?.resetDateText ?? "--" }
 
-    /// 最高使用率（用於 Menu Bar icon 顯示）
+    /// Highest utilization rate (used for Menu Bar icon display)
     var maxUtilization: Double {
         max(sessionUtilization, weeklyUtilization, sonnetUtilization,
             codexSessionUtilization, codexWeeklyUtilization)
     }
 
-    /// Menu Bar 顯示文字
+    /// Text displayed in the Menu Bar
     var statusBarLabel: String {
         guard hasAnyUsageData else { return "..." }
         return "\(Int(maxUtilization.rounded()))%"
     }
 
-    /// 上次更新的人類可讀時間
+    /// Human-readable time since the last update
     var lastUpdatedText: String {
         guard let date = lastUpdated else { return "從未更新" }
         let secs = Date().timeIntervalSince(date)
@@ -169,7 +169,7 @@ final class UsageViewModel: ObservableObject {
         return "\(Int(secs / 60)) 分鐘前"
     }
 
-    /// 是否顯示 Sonnet 專屬列（有資料且 > 0）
+    /// Whether to show the Sonnet-specific row (data is present and > 0)
     var shouldShowSonnet: Bool {
         (usageData?.sevenDaySonnet?.utilization ?? 0) > 0
     }
