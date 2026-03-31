@@ -10,7 +10,7 @@ struct UsageWindow: Codable {
         case resetsAt = "resets_at"
     }
 
-    /// 轉換 ISO8601 字串為 Date
+    /// Converts an ISO8601 string to a Date
     var resetDate: Date? {
         guard let resetsAt else { return nil }
         let withFraction = ISO8601DateFormatter()
@@ -19,7 +19,7 @@ struct UsageWindow: Codable {
         return ISO8601DateFormatter().date(from: resetsAt)
     }
 
-    /// 距離重置的人類可讀時間（e.g. "4h 38m"、"2d"、"soon"）
+    /// Human-readable time until reset (e.g. "4h 38m", "2d", "soon")
     var timeUntilResetText: String {
         guard let date = resetDate else { return "--" }
         let interval = date.timeIntervalSinceNow
@@ -36,7 +36,7 @@ struct UsageWindow: Codable {
         }
     }
 
-    /// 重置日期的短格式（e.g. "4/4"）
+    /// Short format of the reset date (e.g. "4/4")
     var resetDateText: String {
         guard let date = resetDate else { return "--" }
         let f = DateFormatter()

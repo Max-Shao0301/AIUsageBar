@@ -129,7 +129,7 @@ struct PopoverView: View {
                     resetInfo:   viewModel.weeklyResetText
                 )
 
-                // Sonnet（只在有資料時顯示）
+                // Sonnet (only shown when data is available)
                 if viewModel.shouldShowSonnet {
                     Divider()
                     UsageProgressRow(
@@ -165,16 +165,6 @@ struct PopoverView: View {
                 )
             }
 
-            if let codexError = viewModel.codexErrorMessage, !viewModel.shouldShowCodex {
-                if viewModel.usageData != nil {
-                    Divider()
-                }
-                sectionHeader("Codex")
-                Text(codexError)
-                    .font(.system(size: 11))
-                    .foregroundColor(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
         }
         .padding(16)
     }
@@ -202,7 +192,7 @@ struct PopoverView: View {
     // MARK: - Footer
     private var footerView: some View {
         HStack {
-            // 上次更新
+            // Last updated
             HStack(spacing: 4) {
                 Image(systemName: "clock")
                     .font(.system(size: 10))

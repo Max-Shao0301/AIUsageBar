@@ -24,7 +24,7 @@ final class KeychainService {
     static let shared = KeychainService()
     private init() {}
 
-    /// Claude Desktop App 存入 Keychain 的服務名稱
+    /// Service name used by Claude Desktop App when saving to Keychain
     private let serviceName = "Claude Code-credentials"
 
     // MARK: Read
@@ -58,7 +58,7 @@ final class KeychainService {
         }
     }
 
-    // MARK: Write（更新 refreshed token）
+    // MARK: Write (update refreshed token)
     func saveCredentials(_ credentials: ClaudeCredentials) throws {
         let data = try JSONEncoder().encode(credentials)
 
@@ -72,7 +72,7 @@ final class KeychainService {
         let updateStatus = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
 
         if updateStatus == errSecItemNotFound {
-            // 不存在就新增
+            // Item doesn't exist yet, so add it
             var addQuery = query
             addQuery[kSecValueData] = data
             let addStatus = SecItemAdd(addQuery as CFDictionary, nil)
