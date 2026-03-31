@@ -38,7 +38,7 @@ final class ChromeCookieService {
             throw CookieError.safeStorageKeyNotFound
         }
         #if DEBUG
-        print("🔑 [ChromeCookieService] Keychain raw data length=\(data.count)")
+        print("[ChromeCookieService] Keychain raw data length=\(data.count)")
         #endif
         return data
     }

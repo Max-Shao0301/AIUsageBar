@@ -30,18 +30,18 @@ final class CodexUsageService {
         if let auth = loadAuthFile() {
             do {
                 let result = try await fetchUsageWithOAuth(auth: auth)
-                print("✅ [CodexUsageService] 使用 OAuth API")
+                print("[CodexUsageService] 使用 OAuth API")
                 return result
             } catch {
-                print("⚠️ [CodexUsageService] OAuth 失敗（\(error.localizedDescription)），降級使用 Cache")
+                print("[CodexUsageService] OAuth 失敗（\(error.localizedDescription)），降級使用 Cache")
             }
         } else {
-            print("ℹ️ [CodexUsageService] 找不到 ~/.codex/auth.json，使用 Cache")
+            print("[CodexUsageService] 找不到 ~/.codex/auth.json，使用 Cache")
         }
 
         // Strategy 2: Read from Codex App local cache (fallback)
         let result = try loadUsageFromCache()
-        print("✅ [CodexUsageService] 使用 Codex Cache")
+        print("[CodexUsageService] 使用 Codex Cache")
         return result
     }
 

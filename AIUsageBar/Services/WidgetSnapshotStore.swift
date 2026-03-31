@@ -46,13 +46,13 @@ enum WidgetSnapshotStore {
     static func save(_ snapshot: WidgetUsageSnapshot) {
         guard let containerURL = containerURL() else {
             #if DEBUG
-            print("⚠️ [WidgetSnapshotStore] App Group container not found: \(appGroupID)")
-            print("⚠️ 請確認 Signing & Capabilities 已為兩個 Target 加入 App Groups")
+            print("[WidgetSnapshotStore] App Group container not found: \(appGroupID)")
+            print("請確認 Signing & Capabilities 已為兩個 Target 加入 App Groups")
             #endif
             return
         }
         #if DEBUG
-        print("✅ [WidgetSnapshotStore] Saving to: \(containerURL.path)")
+        print("[WidgetSnapshotStore] Saving to: \(containerURL.path)")
         #endif
 
         let fileURL = containerURL.appendingPathComponent(fileName)

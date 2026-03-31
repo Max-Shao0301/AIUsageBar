@@ -27,8 +27,31 @@ final class KeychainService {
     /// Service name used by Claude Desktop App when saving to Keychain
     private let serviceName = "Claude Code-credentials"
 
+    /// Account name AIUsageBar uses for its own copy (avoids touching Claude Code CLI's item)
+    private let ownAccount = "AIUsageBar-credentials"
+
     // MARK: Read
     func readCredentials() throws -> ClaudeCredentials {
+        // Always read from AIUsageBar's own item first — no Keychain prompt needed
+        // since AIUsageBar itself owns this item.
+        let ownQuery: [CFString: Any] = [
+            kSecClass:       kSecClassGenericPassword,
+            kSecAttrService: serviceName,
+            kSecAttrAccount: ownAccount,
+            kSecReturnData:  true,
+            kSecMatchLimit:  kSecMatchLimitOne
+        ]
+        var ownResult: AnyObject?
+        if SecItemCopyMatching(ownQuery as CFDictionary, &ownResult) == errSecSuccess,
+           let data = ownResult as? Data,
+           let creds = try? JSONDecoder().decode(ClaudeCredentials.self, from: data) {
+            return creds
+        }
+
+        // First-time fallback: read from Claude Code CLI's item (will prompt once),
+        // then immediately cache a copy into AIUsageBar's own item so future reads
+        // never need to touch the CLI item again (and won't be affected by the CLI
+        // recreating its item on token refresh).
         let query: [CFString: Any] = [
             kSecClass:       kSecClassGenericPassword,
             kSecAttrService: serviceName,
@@ -44,11 +67,16 @@ final class KeychainService {
             guard let data = result as? Data else {
                 throw KeychainError.decodingFailed("回傳資料非 Data 型別")
             }
+            let creds: ClaudeCredentials
             do {
-                return try JSONDecoder().decode(ClaudeCredentials.self, from: data)
+                creds = try JSONDecoder().decode(ClaudeCredentials.self, from: data)
             } catch {
                 throw KeychainError.decodingFailed(error.localizedDescription)
             }
+            // Cache into AIUsageBar's own item — subsequent reads will use this copy
+            // and won't be disrupted when Claude Code CLI rotates its item.
+            try? saveCredentials(creds)
+            return creds
 
         case errSecItemNotFound:
             throw KeychainError.itemNotFound
@@ -58,23 +86,22 @@ final class KeychainService {
         }
     }
 
-    // MARK: Write (update refreshed token)
+    // MARK: Write (always writes to AIUsageBar's own item — never touches Claude Code CLI's item)
     func saveCredentials(_ credentials: ClaudeCredentials) throws {
         let data = try JSONEncoder().encode(credentials)
 
         let query: [CFString: Any] = [
             kSecClass:       kSecClassGenericPassword,
-            kSecAttrService: serviceName
+            kSecAttrService: serviceName,
+            kSecAttrAccount: ownAccount
         ]
 
-        let attributes: [CFString: Any] = [kSecValueData: data]
-
-        let updateStatus = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
+        let updateStatus = SecItemUpdate(query as CFDictionary, [kSecValueData: data] as CFDictionary)
 
         if updateStatus == errSecItemNotFound {
-            // Item doesn't exist yet, so add it
             var addQuery = query
             addQuery[kSecValueData] = data
+            addQuery[kSecAttrAccessible] = kSecAttrAccessibleAfterFirstUnlock
             let addStatus = SecItemAdd(addQuery as CFDictionary, nil)
             guard addStatus == errSecSuccess else {
                 throw KeychainError.saveFailed(addStatus)
