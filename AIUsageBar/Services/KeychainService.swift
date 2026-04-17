@@ -86,6 +86,16 @@ final class KeychainService {
         }
     }
 
+    // MARK: Clear cached item (call when token is rejected so next read re-fetches from CLI)
+    func clearCachedCredentials() {
+        let query: [CFString: Any] = [
+            kSecClass:       kSecClassGenericPassword,
+            kSecAttrService: serviceName,
+            kSecAttrAccount: ownAccount
+        ]
+        SecItemDelete(query as CFDictionary)
+    }
+
     // MARK: Write (always writes to AIUsageBar's own item — never touches Claude Code CLI's item)
     func saveCredentials(_ credentials: ClaudeCredentials) throws {
         let data = try JSONEncoder().encode(credentials)

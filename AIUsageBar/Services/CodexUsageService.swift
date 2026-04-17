@@ -2,15 +2,18 @@ import Foundation
 
 // MARK: - Errors
 enum CodexUsageServiceError: Error, LocalizedError {
-    case cacheDirectoryNotFound
-    case usageCacheNotFound
+    case notSignedIn
+    case networkError(Error)
+    case unauthorized
 
     var errorDescription: String? {
         switch self {
-        case .cacheDirectoryNotFound:
-            return "找不到 Codex 快取資料夾。"
-        case .usageCacheNotFound:
-            return "找不到 Codex 用量資料。請確認已安裝並登入 Codex。"
+        case .notSignedIn:
+            return "找不到 Codex 登入憑證。\n請確認已安裝並登入 Codex CLI。"
+        case .networkError(let e):
+            return "網路錯誤：\(e.localizedDescription)"
+        case .unauthorized:
+            return "授權失效，請重新登入 Codex。"
         }
     }
 }
@@ -26,26 +29,15 @@ final class CodexUsageService {
     // MARK: - Public
 
     func fetchUsage() async throws -> CodexUsageData {
-        // Strategy 1: OAuth API (preferred, does not require Codex App to be running)
-        if let auth = loadAuthFile() {
-            do {
-                let result = try await fetchUsageWithOAuth(auth: auth)
-                print("[CodexUsageService] 使用 OAuth API")
-                return result
-            } catch {
-                print("[CodexUsageService] OAuth 失敗（\(error.localizedDescription)），降級使用 Cache")
-            }
-        } else {
-            print("[CodexUsageService] 找不到 ~/.codex/auth.json，使用 Cache")
+        guard let auth = loadAuthFile() else {
+            throw CodexUsageServiceError.notSignedIn
         }
-
-        // Strategy 2: Read from Codex App local cache (fallback)
-        let result = try loadUsageFromCache()
-        print("[CodexUsageService] 使用 Codex Cache")
+        let result = try await fetchUsageWithOAuth(auth: auth)
+        print("[CodexUsageService] 使用 OAuth API")
         return result
     }
 
-    // MARK: - Strategy 1: OAuth
+    // MARK: - Auth File
 
     private struct CodexAuthFile: Codable {
         let tokens: Tokens
@@ -72,11 +64,9 @@ final class CodexUsageService {
         return try? JSONDecoder().decode(CodexAuthFile.self, from: data)
     }
 
-    /// Parses the JWT payload to get the expiry time
     private func jwtExpiry(_ token: String) -> Date? {
         let parts = token.split(separator: ".")
         guard parts.count == 3 else { return nil }
-        // JWT uses base64url (- and _); Data(base64Encoded:) requires standard base64 (+ and /)
         var base64 = String(parts[1])
             .replacingOccurrences(of: "-", with: "+")
             .replacingOccurrences(of: "_", with: "/")
@@ -93,11 +83,12 @@ final class CodexUsageService {
         return Date() > expiry.addingTimeInterval(-60)
     }
 
+    // MARK: - OAuth
+
     private func fetchUsageWithOAuth(auth: CodexAuthFile, isRetry: Bool = false) async throws -> CodexUsageData {
         var accessToken = auth.tokens.accessToken
         var currentAuth = auth
 
-        // Refresh the token if it has expired
         if isTokenExpired(accessToken), let refreshToken = auth.tokens.refreshToken {
             currentAuth = try await refreshOAuthToken(auth: auth, refreshToken: refreshToken)
             accessToken = currentAuth.tokens.accessToken
@@ -116,31 +107,28 @@ final class CodexUsageService {
         do {
             (data, response) = try await URLSession.shared.data(for: req)
         } catch {
-            throw error
+            throw CodexUsageServiceError.networkError(error)
         }
 
         guard let http = response as? HTTPURLResponse else {
-            throw CodexUsageServiceError.usageCacheNotFound
+            throw CodexUsageServiceError.networkError(URLError(.badServerResponse))
         }
 
         switch http.statusCode {
         case 200:
-            do {
-                return try JSONDecoder().decode(CodexUsageData.self, from: data)
-            } catch {
-                throw error
-            }
+            return try JSONDecoder().decode(CodexUsageData.self, from: data)
         case 401, 403:
-            // On 401/403, refresh the token and retry once
             if !isRetry, let refreshToken = currentAuth.tokens.refreshToken {
                 let refreshed = try await refreshOAuthToken(auth: currentAuth, refreshToken: refreshToken)
                 return try await fetchUsageWithOAuth(auth: refreshed, isRetry: true)
             }
-            throw CodexUsageServiceError.usageCacheNotFound
+            throw CodexUsageServiceError.unauthorized
         default:
-            throw CodexUsageServiceError.usageCacheNotFound
+            throw CodexUsageServiceError.networkError(URLError(.badServerResponse))
         }
     }
+
+    // MARK: - Token Refresh
 
     private func refreshOAuthToken(auth: CodexAuthFile, refreshToken: String) async throws -> CodexAuthFile {
         let url = URL(string: "https://auth.openai.com/oauth/token")!
@@ -158,7 +146,7 @@ final class CodexUsageService {
 
         let (data, response) = try await URLSession.shared.data(for: req)
         guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
-            throw CodexUsageServiceError.usageCacheNotFound
+            throw CodexUsageServiceError.unauthorized
         }
 
         struct TokenResponse: Codable {
@@ -172,7 +160,6 @@ final class CodexUsageService {
 
         let tokenResponse = try JSONDecoder().decode(TokenResponse.self, from: data)
 
-        // Write the refreshed token back to ~/.codex/auth.json (preserving other fields in the original file)
         saveUpdatedTokens(
             accessToken:  tokenResponse.accessToken,
             refreshToken: tokenResponse.refreshToken ?? refreshToken,
@@ -186,7 +173,6 @@ final class CodexUsageService {
         ))
     }
 
-    /// Updates only the token fields in auth.json, preserving all other fields (e.g. id_token)
     private func saveUpdatedTokens(accessToken: String, refreshToken: String, accountId: String?) {
         let fileURL = URL(fileURLWithPath: authFilePath)
         guard var raw = (try? Data(contentsOf: fileURL))
@@ -201,106 +187,6 @@ final class CodexUsageService {
 
         if let data = try? JSONSerialization.data(withJSONObject: raw, options: .prettyPrinted) {
             try? data.write(to: fileURL)
-        }
-    }
-
-    // MARK: - Strategy 2: Local Cache (fallback)
-
-    private let usageURLMarker = Data("https://chatgpt.com/backend-api/wham/usage".utf8)
-    private let brotliPaths = [
-        "/opt/homebrew/bin/brotli",
-        "/usr/local/bin/brotli",
-        "/usr/bin/brotli"
-    ]
-
-    private func loadUsageFromCache() throws -> CodexUsageData {
-        let cacheDir = URL(fileURLWithPath: NSHomeDirectory())
-            .appendingPathComponent("Library/Application Support/Codex/Cache/Cache_Data")
-
-        var isDir: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: cacheDir.path, isDirectory: &isDir), isDir.boolValue else {
-            throw CodexUsageServiceError.cacheDirectoryNotFound
-        }
-
-        let keys: Set<URLResourceKey> = [.contentModificationDateKey, .isRegularFileKey]
-        let urls = try FileManager.default.contentsOfDirectory(
-            at: cacheDir,
-            includingPropertiesForKeys: Array(keys),
-            options: [.skipsHiddenFiles]
-        )
-
-        let sortedFiles = urls
-            .compactMap { url -> (URL, Date)? in
-                guard let values = try? url.resourceValues(forKeys: keys),
-                      values.isRegularFile == true else { return nil }
-                return (url, values.contentModificationDate ?? .distantPast)
-            }
-            .sorted { $0.1 > $1.1 }
-            .map { $0.0 }
-
-        let decoder = JSONDecoder()
-
-        for fileURL in sortedFiles {
-            guard let fileData = try? Data(contentsOf: fileURL) else { continue }
-            guard let markerRange = fileData.range(of: usageURLMarker) else { continue }
-
-            let start = markerRange.upperBound
-            let end = min(fileData.count, start + 180)
-            if start >= end { continue }
-
-            var candidateOffsets: [Int] = []
-            candidateOffsets.append(contentsOf: start...min(start + 24, fileData.count - 1))
-            for i in start..<end {
-                if fileData[i] == 0x1b || fileData[i] == 0x0b || fileData[i] == 0x8b {
-                    candidateOffsets.append(i)
-                }
-            }
-
-            for offset in Array(Set(candidateOffsets)).sorted() {
-                let slice = fileData[offset...]
-                guard let jsonData = decompressBrotli(Data(slice)) else { continue }
-                if let decoded = try? decoder.decode(CodexUsageData.self, from: jsonData),
-                   decoded.rateLimit?.primaryWindow != nil {
-                    return decoded
-                }
-            }
-        }
-
-        throw CodexUsageServiceError.usageCacheNotFound
-    }
-
-    private func decompressBrotli(_ compressed: Data) -> Data? {
-        let fm = FileManager.default
-        let executable = brotliPaths.first(where: { fm.isExecutableFile(atPath: $0) })
-
-        let process = Process()
-        if let executable {
-            process.executableURL = URL(fileURLWithPath: executable)
-            process.arguments = ["-d"]
-        } else {
-            process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-            process.arguments = ["brotli", "-d"]
-            var env = ProcessInfo.processInfo.environment
-            env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
-            process.environment = env
-        }
-
-        let stdinPipe  = Pipe()
-        let stdoutPipe = Pipe()
-        process.standardInput  = stdinPipe
-        process.standardOutput = stdoutPipe
-        process.standardError  = Pipe()
-
-        do {
-            try process.run()
-            stdinPipe.fileHandleForWriting.write(compressed)
-            stdinPipe.fileHandleForWriting.closeFile()
-            let output = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
-            process.waitUntilExit()
-            guard !output.isEmpty else { return nil }
-            return output
-        } catch {
-            return nil
         }
     }
 }

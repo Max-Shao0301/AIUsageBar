@@ -7,7 +7,6 @@ enum ClaudeServiceError: Error, LocalizedError {
     case invalidResponse(Int)
     case decodingError(Error)
     case unauthorized
-    case orgNotFound
     case rateLimited
 
     var errorDescription: String? {
@@ -17,7 +16,6 @@ enum ClaudeServiceError: Error, LocalizedError {
         case .invalidResponse(let c): return "伺服器回傳錯誤 HTTP \(c)"
         case .decodingError(let e):   return "資料解析失敗：\(e.localizedDescription)"
         case .unauthorized:           return "授權失效，請重新登入 Claude。"
-        case .orgNotFound:            return "找不到組織資訊，請確認已登入 Claude Desktop App。"
         case .rateLimited:            return "請求頻率過高，請稍後再試。"
         }
     }
@@ -28,43 +26,24 @@ final class ClaudeService {
     static let shared = ClaudeService()
     private init() {}
 
-    // Cached org ID for the Cookie fallback strategy
-    private var cachedOrgId: String?
-
-    // Public OAuth client ID for Claude Code
     private let oauthClientId = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 
     // MARK: - Public: Fetch Usage
-    func fetchUsage() async throws -> UsageData {
-        // Strategy 1: Claude Code OAuth token (does not require Claude Desktop)
-        if let credentials = try? KeychainService.shared.readCredentials() {
-            do {
-                let result = try await fetchUsageWithOAuth(credentials: credentials)
-                print("[ClaudeService] 使用 Claude Code OAuth token")
-                return result
-            } catch ClaudeServiceError.unauthorized {
-                print("[ClaudeService] OAuth token 無效，降級使用 Claude Desktop Cookie")
-            } catch ClaudeServiceError.rateLimited {
-                print("[ClaudeService] OAuth 頻率限制，降級使用 Claude Desktop Cookie")
-            } catch {
-                print("[ClaudeService] OAuth 失敗（\(error.localizedDescription)），降級使用 Claude Desktop Cookie")
-            }
-        } else {
-            print("[ClaudeService] 找不到 Claude Code credentials，使用 Claude Desktop Cookie")
-        }
 
-        // Strategy 2: Claude Desktop session cookie (fallback)
-        let result = try await fetchUsageWithCookie()
-        print("[ClaudeService] 使用 Claude Desktop Cookie")
+    func fetchUsage() async throws -> UsageData {
+        guard let credentials = try? KeychainService.shared.readCredentials() else {
+            throw ClaudeServiceError.noCredentials("找不到 Claude Code 登入憑證。\n請確認已安裝並登入 Claude Code CLI。")
+        }
+        let result = try await fetchUsageWithOAuth(credentials: credentials)
+        print("✅ [ClaudeService] 使用 Claude Code OAuth token")
         return result
     }
 
-    // MARK: - Strategy 1: OAuth
+    // MARK: - OAuth
 
     private func fetchUsageWithOAuth(credentials: ClaudeCredentials, isRetry: Bool = false) async throws -> UsageData {
         var currentCredentials = credentials
 
-        // Refresh the token if it has expired
         if credentials.claudeAiOauth.isExpired,
            let refreshToken = credentials.claudeAiOauth.refreshToken {
             currentCredentials = try await refreshOAuthToken(refreshToken: refreshToken)
@@ -97,9 +76,10 @@ final class ClaudeService {
                 throw ClaudeServiceError.decodingError(error)
             }
         case 401, 403:
+            // Clear cached item so next attempt re-reads from Claude Code CLI
+            KeychainService.shared.clearCachedCredentials()
             throw ClaudeServiceError.unauthorized
         case 429:
-            // On 429, refresh the token and retry once
             if !isRetry, let refreshToken = currentCredentials.claudeAiOauth.refreshToken {
                 let refreshed = try await refreshOAuthToken(refreshToken: refreshToken)
                 return try await fetchUsageWithOAuth(credentials: refreshed, isRetry: true)
@@ -164,108 +144,7 @@ final class ClaudeService {
             )
         )
 
-        // Save the refreshed token back to Keychain
         try? KeychainService.shared.saveCredentials(newCredentials)
-
         return newCredentials
-    }
-
-    // MARK: - Strategy 2: Cookie (fallback)
-
-    private func fetchUsageWithCookie() async throws -> UsageData {
-        let sessionKey: String
-        do {
-            sessionKey = try ChromeCookieService.shared.getSessionKey()
-        } catch {
-            throw ClaudeServiceError.noCredentials(error.localizedDescription)
-        }
-
-        let orgId: String
-        if let cached = cachedOrgId {
-            orgId = cached
-        } else {
-            orgId = try await fetchOrgId(sessionKey: sessionKey)
-            cachedOrgId = orgId
-        }
-
-        return try await fetchUsageData(sessionKey: sessionKey, orgId: orgId)
-    }
-
-    // MARK: - Fetch Org ID (used by Cookie strategy)
-
-    private func fetchOrgId(sessionKey: String) async throws -> String {
-        let url = URL(string: "https://claude.ai/api/organizations")!
-        let (data, response) = try await makeRequest(url: url, sessionKey: sessionKey)
-
-        guard let http = response as? HTTPURLResponse else {
-            throw ClaudeServiceError.invalidResponse(0)
-        }
-
-        #if DEBUG
-        print("🔍 [ClaudeService] /api/organizations HTTP \(http.statusCode)")
-        #endif
-
-        switch http.statusCode {
-        case 200: break
-        case 401, 403: throw ClaudeServiceError.unauthorized
-        default: throw ClaudeServiceError.invalidResponse(http.statusCode)
-        }
-
-        struct OrgResponse: Codable { let uuid: String }
-        let orgs = try JSONDecoder().decode([OrgResponse].self, from: data)
-        guard let first = orgs.first else {
-            throw ClaudeServiceError.orgNotFound
-        }
-        return first.uuid
-    }
-
-    // MARK: - Fetch Usage Data (used by Cookie strategy)
-
-    private func fetchUsageData(sessionKey: String, orgId: String) async throws -> UsageData {
-        let url = URL(string: "https://claude.ai/api/organizations/\(orgId)/usage")!
-        let (data, response) = try await makeRequest(url: url, sessionKey: sessionKey)
-
-        guard let http = response as? HTTPURLResponse else {
-            throw ClaudeServiceError.invalidResponse(0)
-        }
-
-        #if DEBUG
-        let body = String(data: data, encoding: .utf8) ?? "(無法解碼)"
-        print("🔍 [ClaudeService] /usage HTTP \(http.statusCode)\n\(body)")
-        #endif
-
-        switch http.statusCode {
-        case 200:
-            do {
-                return try JSONDecoder().decode(UsageData.self, from: data)
-            } catch {
-                throw ClaudeServiceError.decodingError(error)
-            }
-        case 401, 403:
-            cachedOrgId = nil
-            throw ClaudeServiceError.unauthorized
-        default:
-            throw ClaudeServiceError.invalidResponse(http.statusCode)
-        }
-    }
-
-    // MARK: - Shared Request Builder (used by Cookie strategy)
-
-    private func makeRequest(url: URL, sessionKey: String) async throws -> (Data, URLResponse) {
-        var req = URLRequest(url: url)
-        req.httpMethod = "GET"
-        req.setValue("sessionKey=\(sessionKey)", forHTTPHeaderField: "Cookie")
-        req.setValue("application/json",         forHTTPHeaderField: "Accept")
-        req.setValue("application/json",         forHTTPHeaderField: "Content-Type")
-        req.setValue("web_claude_ai",            forHTTPHeaderField: "anthropic-client-platform")
-        req.setValue("https://claude.ai",        forHTTPHeaderField: "Origin")
-        req.setValue("https://claude.ai",        forHTTPHeaderField: "Referer")
-        req.timeoutInterval = 15
-
-        do {
-            return try await URLSession.shared.data(for: req)
-        } catch {
-            throw ClaudeServiceError.networkError(error)
-        }
     }
 }
