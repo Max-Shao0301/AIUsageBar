@@ -103,6 +103,7 @@ final class UsageViewModel: ObservableObject {
         do {
             return .success(try await ClaudeService.shared.fetchUsage())
         } catch {
+            print("❌ [ClaudeService] 錯誤：\(error.localizedDescription)")
             return .failure(error)
         }
     }
