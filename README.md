@@ -22,9 +22,8 @@ AIUsageBar/
 │  │  ├─ PopoverView.swift          # 主 Popover UI
 │  │  └─ UsageProgressRow.swift     # 進度列元件
 │  ├─ Services/
-│  │  ├─ ClaudeService.swift        # Claude 用量 API + Cookie fallback
-│  │  ├─ CodexUsageService.swift    # Codex OAuth + 本機 Cache fallback
-│  │  ├─ ChromeCookieService.swift  # 讀取 Claude session cookie
+│  │  ├─ ClaudeService.swift        # Claude 用量 API（OAuth）
+│  │  ├─ CodexUsageService.swift    # Codex 用量 API（OAuth）
 │  │  ├─ KeychainService.swift      # 讀取/更新 Claude OAuth credentials
 │  │  └─ WidgetSnapshotStore.swift  # 將用量快照寫入 App Group
 │  ├─ Models/
@@ -54,24 +53,16 @@ AIUsageBar/
 
 ## Claude 用量流程
 
-1. 優先走 Claude OAuth（從 Keychain 取 token）。
+1. 從 Keychain 取 OAuth token（優先讀 AIUsageBar 自有快取，首次讀取 Claude Code CLI item 並存入快取）。
 2. 若 token 過期，先 refresh token。
 3. 呼叫 `https://api.anthropic.com/api/oauth/usage`。
-4. 若 OAuth 失敗（401/403/429/其他），降級使用 Cookie 策略。
-5. Cookie 策略：
-    - 從瀏覽器 cookie 取 `sessionKey`
-    - 呼叫 `/api/organizations` 取得 orgId
-    - 呼叫 `/api/organizations/{orgId}/usage` 取得用量
+4. 若 API 回 401/403，自動清除 Keychain 快取，下次重新從 CLI 取得最新 token。
 
 ## Codex 用量流程
 
-1. 優先走 OAuth：讀 `~/.codex/auth.json`。
+1. 讀取 `~/.codex/auth.json` 取得 OAuth token。
 2. 若 access token 接近過期，refresh token。
 3. 呼叫 `https://chatgpt.com/backend-api/wham/usage`。
-4. 若 OAuth 失敗，降級讀本機 Cache：
-    - 掃描 `~/Library/Application Support/Codex/Cache/Cache_Data`
-    - 尋找 wham usage marker
-    - 嘗試 Brotli 解壓並 decode `CodexUsageData`
 
 ## Widget 流程
 
@@ -95,8 +86,7 @@ AIUsageBar/
 
 ## 安裝方式
 - Install:
-   - 解壓縮後將AIUsageBar.app 移至applications 
-   - 打開APP會看到 "無法打開，因為無法驗證開法者" 
-   - 至 系統設定 → 隱私權與安全性 往下會看到AIUsageAPP → 仍要開啟
-
-
+   - 解壓縮後將 AIUsageBar.app 移至 Applications
+   - 打開 APP 會看到「無法打開，因為無法驗證開發者」
+   - 至 系統設定 → 隱私權與安全性 往下會看到 AIUsageBar APP → 仍要開啟
+   - 首次啟動時會出現 Keychain 授權視窗，輸入一次密碼後點「永遠允許」即可
