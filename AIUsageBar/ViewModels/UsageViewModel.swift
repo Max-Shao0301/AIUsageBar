@@ -7,9 +7,11 @@ final class UsageViewModel: ObservableObject {
     // MARK: - Published State
     @Published var usageData: UsageData?
     @Published var codexUsageData: CodexUsageData?
+    @Published var antigravityUsageData: AntigravityUsageData?
     @Published var isLoading = false
     @Published var errorMessage: String?
     @Published var codexErrorMessage: String?
+    @Published var antigravityErrorMessage: String?
     @Published var lastUpdated: Date?
 
     // MARK: - Auto Refresh
@@ -37,11 +39,13 @@ final class UsageViewModel: ObservableObject {
         isLoading = true
         errorMessage = nil
         codexErrorMessage = nil
+        antigravityErrorMessage = nil
 
         async let claudeResult = fetchClaudeResult()
         async let codexResult = fetchCodexResult()
+        async let antigravityResult = fetchAntigravityResult()
 
-        let (claude, codex) = await (claudeResult, codexResult)
+        let (claude, codex, antigravity) = await (claudeResult, codexResult, antigravityResult)
         var hasFreshSuccess = false
 
         switch claude {
@@ -64,12 +68,23 @@ final class UsageViewModel: ObservableObject {
             }
         }
 
-        if usageData == nil && codexUsageData == nil {
-            if let claudeError = errorMessage, let codexError = codexErrorMessage {
-                errorMessage = "Claude：\(claudeError)\nCodex：\(codexError)"
-            } else if errorMessage == nil {
-                errorMessage = codexErrorMessage
+        switch antigravity {
+        case .success(let data):
+            antigravityUsageData = data
+            hasFreshSuccess = true
+        case .failure(let error):
+            if antigravityUsageData == nil {
+                antigravityErrorMessage = error.localizedDescription
             }
+        }
+
+        if !hasAnyUsageData {
+            let errors = [
+                errorMessage.map { "Claude：\($0)" },
+                codexErrorMessage.map { "Codex：\($0)" },
+                antigravityErrorMessage.map { "Antigravity：\($0)" }
+            ].compactMap { $0 }
+            errorMessage = errors.joined(separator: "\n")
         }
 
         if hasFreshSuccess {
@@ -93,7 +108,15 @@ final class UsageViewModel: ObservableObject {
             codexSessionUtilization: codexUsageData?.fiveHour?.utilization,
             codexWeeklyUtilization: codexUsageData?.sevenDay?.utilization,
             codexSessionResetText: codexUsageData?.fiveHour?.timeUntilResetText,
-            codexWeeklyResetText: codexUsageData?.sevenDay?.resetDateText
+            codexWeeklyResetText: codexUsageData?.sevenDay?.resetDateText,
+            antigravityGeminiSessionUtilization: antigravityUsageData?.gemini?.fiveHour?.utilization,
+            antigravityGeminiWeeklyUtilization: antigravityUsageData?.gemini?.weekly?.utilization,
+            antigravityGeminiSessionResetText: antigravityUsageData?.gemini?.fiveHour?.timeUntilResetText,
+            antigravityGeminiWeeklyResetText: antigravityUsageData?.gemini?.weekly?.resetDateText,
+            antigravityClaudeGPTSessionUtilization: antigravityUsageData?.claudeAndGPT?.fiveHour?.utilization,
+            antigravityClaudeGPTWeeklyUtilization: antigravityUsageData?.claudeAndGPT?.weekly?.utilization,
+            antigravityClaudeGPTSessionResetText: antigravityUsageData?.claudeAndGPT?.fiveHour?.timeUntilResetText,
+            antigravityClaudeGPTWeeklyResetText: antigravityUsageData?.claudeAndGPT?.weekly?.resetDateText
         )
 
         WidgetSnapshotStore.save(snapshot)
@@ -116,6 +139,14 @@ final class UsageViewModel: ObservableObject {
         }
     }
 
+    private func fetchAntigravityResult() async -> Result<AntigravityUsageData, Error> {
+        do {
+            return .success(try await AntigravityUsageService.shared.fetchUsage())
+        } catch {
+            return .failure(error)
+        }
+    }
+
     // MARK: - Private: Background Auto-Refresh
     private func startAutoRefresh() {
         refreshTask = Task { [weak self] in
@@ -130,7 +161,7 @@ final class UsageViewModel: ObservableObject {
     // MARK: - Computed: Convenience properties for UI
 
     var hasAnyUsageData: Bool {
-        usageData != nil || codexUsageData != nil
+        usageData != nil || codexUsageData != nil || antigravityUsageData != nil
     }
 
     // Claude
@@ -149,10 +180,23 @@ final class UsageViewModel: ObservableObject {
     var codexSessionResetText: String { codexUsageData?.fiveHour?.timeUntilResetText ?? "--" }
     var codexWeeklyResetText: String  { codexUsageData?.sevenDay?.resetDateText ?? "--" }
 
+    // Antigravity
+    var antigravityGeminiSessionUtilization: Double { antigravityUsageData?.gemini?.fiveHour?.utilization ?? 0 }
+    var antigravityGeminiWeeklyUtilization: Double  { antigravityUsageData?.gemini?.weekly?.utilization ?? 0 }
+    var antigravityGeminiSessionResetText: String   { antigravityUsageData?.gemini?.fiveHour?.timeUntilResetText ?? "--" }
+    var antigravityGeminiWeeklyResetText: String    { antigravityUsageData?.gemini?.weekly?.resetDateText ?? "--" }
+
+    var antigravityClaudeGPTSessionUtilization: Double { antigravityUsageData?.claudeAndGPT?.fiveHour?.utilization ?? 0 }
+    var antigravityClaudeGPTWeeklyUtilization: Double  { antigravityUsageData?.claudeAndGPT?.weekly?.utilization ?? 0 }
+    var antigravityClaudeGPTSessionResetText: String   { antigravityUsageData?.claudeAndGPT?.fiveHour?.timeUntilResetText ?? "--" }
+    var antigravityClaudeGPTWeeklyResetText: String    { antigravityUsageData?.claudeAndGPT?.weekly?.resetDateText ?? "--" }
+
     /// Highest utilization rate (used for Menu Bar icon display)
     var maxUtilization: Double {
         max(sessionUtilization, weeklyUtilization, sonnetUtilization,
-            codexSessionUtilization, codexWeeklyUtilization)
+            codexSessionUtilization, codexWeeklyUtilization,
+            antigravityGeminiSessionUtilization, antigravityGeminiWeeklyUtilization,
+            antigravityClaudeGPTSessionUtilization, antigravityClaudeGPTWeeklyUtilization)
     }
 
     /// Text displayed in the Menu Bar
@@ -177,5 +221,9 @@ final class UsageViewModel: ObservableObject {
 
     var shouldShowCodex: Bool {
         codexUsageData != nil
+    }
+
+    var shouldShowAntigravity: Bool {
+        antigravityUsageData != nil
     }
 }

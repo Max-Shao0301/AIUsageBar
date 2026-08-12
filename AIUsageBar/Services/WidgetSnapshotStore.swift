@@ -15,6 +15,16 @@ struct WidgetUsageSnapshot: Codable {
     let codexWeeklyUtilization: Double?
     let codexSessionResetText: String?
     let codexWeeklyResetText: String?
+
+    let antigravityGeminiSessionUtilization: Double?
+    let antigravityGeminiWeeklyUtilization: Double?
+    let antigravityGeminiSessionResetText: String?
+    let antigravityGeminiWeeklyResetText: String?
+
+    let antigravityClaudeGPTSessionUtilization: Double?
+    let antigravityClaudeGPTWeeklyUtilization: Double?
+    let antigravityClaudeGPTSessionResetText: String?
+    let antigravityClaudeGPTWeeklyResetText: String?
 }
 
 enum WidgetSnapshotStore {
