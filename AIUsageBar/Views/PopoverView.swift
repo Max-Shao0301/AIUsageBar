@@ -165,6 +165,48 @@ struct PopoverView: View {
                 )
             }
 
+            if viewModel.shouldShowAntigravity {
+                if viewModel.usageData != nil || viewModel.shouldShowCodex {
+                    Divider()
+                }
+
+                sectionHeader("Antigravity")
+
+                UsageProgressRow(
+                    title:       "Gemini · Current Session",
+                    subtitle:    "5 小時共用配額",
+                    utilization: viewModel.antigravityGeminiSessionUtilization,
+                    resetInfo:   viewModel.antigravityGeminiSessionResetText
+                )
+
+                Divider()
+
+                UsageProgressRow(
+                    title:       "Gemini · Weekly",
+                    subtitle:    "每週共用配額",
+                    utilization: viewModel.antigravityGeminiWeeklyUtilization,
+                    resetInfo:   viewModel.antigravityGeminiWeeklyResetText
+                )
+
+                Divider()
+
+                UsageProgressRow(
+                    title:       "Claude + GPT · Current Session",
+                    subtitle:    "5 小時共用配額",
+                    utilization: viewModel.antigravityClaudeGPTSessionUtilization,
+                    resetInfo:   viewModel.antigravityClaudeGPTSessionResetText
+                )
+
+                Divider()
+
+                UsageProgressRow(
+                    title:       "Claude + GPT · Weekly",
+                    subtitle:    "每週共用配額",
+                    utilization: viewModel.antigravityClaudeGPTWeeklyUtilization,
+                    resetInfo:   viewModel.antigravityClaudeGPTWeeklyResetText
+                )
+            }
+
         }
         .padding(16)
     }
@@ -178,6 +220,11 @@ struct PopoverView: View {
                     .frame(width: 14, height: 14)
             } else if title == "Codex" {
                 Image("CodexIcon")
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 14, height: 14)
+            } else if title == "Antigravity" {
+                Image("GeminiIcon")
                     .resizable()
                     .scaledToFit()
                     .frame(width: 14, height: 14)
