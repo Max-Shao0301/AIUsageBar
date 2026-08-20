@@ -34,9 +34,21 @@ final class ClaudeService {
         guard let credentials = try? KeychainService.shared.readCredentials() else {
             throw ClaudeServiceError.noCredentials("找不到 Claude Code 登入憑證。\n請確認已安裝並登入 Claude Code CLI。")
         }
-        let result = try await fetchUsageWithOAuth(credentials: credentials)
-        print("✅ [ClaudeService] 使用 Claude Code OAuth token")
-        return result
+
+        do {
+            let result = try await fetchUsageWithOAuth(credentials: credentials)
+            print("✅ [ClaudeService] 使用 Claude Code OAuth token")
+            return result
+        } catch ClaudeServiceError.unauthorized {
+            // The CLI may have rotated its credentials while our cached copy became invalid.
+            KeychainService.shared.clearCachedCredentials()
+            guard let latestCredentials = try? KeychainService.shared.readCredentials() else {
+                throw ClaudeServiceError.unauthorized
+            }
+            let result = try await fetchUsageWithOAuth(credentials: latestCredentials, isRetry: true)
+            print("✅ [ClaudeService] 已改用 Claude Code 最新 OAuth token")
+            return result
+        }
     }
 
     // MARK: - OAuth
