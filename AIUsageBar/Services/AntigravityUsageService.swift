@@ -1,247 +1,454 @@
 import Foundation
-import Darwin
 
 enum AntigravityUsageServiceError: Error, LocalizedError {
-    case cliNotInstalled
-    case startupTimedOut
+    case authenticationRequired
+    case credentialStoreUnavailable
+    case invalidCredential
+    case unavailable
     case invalidResponse(Int)
     case invalidPayload
     case networkError(Error)
 
     var errorDescription: String? {
         switch self {
-        case .cliNotInstalled:
-            return "找不到 agy CLI。請先安裝並登入 Antigravity CLI。"
-        case .startupTimedOut:
-            return "agy 啟動逾時。請先在終端機執行 agy 並完成登入。"
+        case .authenticationRequired:
+            return "找不到 Antigravity 登入憑證。請先開啟 Antigravity 或執行 agy 登入。"
+        case .credentialStoreUnavailable:
+            return "無法讀取 Antigravity Keychain 憑證，請手動重新整理並允許存取。"
+        case .invalidCredential:
+            return "Antigravity 登入憑證格式無法辨識。"
+        case .unavailable:
+            return "Antigravity 用量服務暫時無法連線。"
         case .invalidResponse(let statusCode):
-            return "Antigravity 本機服務回傳錯誤 HTTP \(statusCode)。"
+            return "Antigravity 用量服務回傳錯誤 HTTP \(statusCode)。"
         case .invalidPayload:
             return "Antigravity 用量資料格式無法辨識。"
         case .networkError(let error):
-            return "無法連線 Antigravity 本機服務：\(error.localizedDescription)"
+            return "Antigravity 網路錯誤：\(error.localizedDescription)"
         }
     }
 }
 
-/// Fetches the two shared Antigravity quota pools shown in its Model Quota UI.
-///
-/// The service reads the quota summary from the signed-in `agy` CLI's loopback
-/// language server. When the CLI is not already running, it briefly starts an
-/// interactive background session and immediately terminates that session after
-/// reading the quota. This avoids handling Google OAuth credentials in the app.
+/// Reads quota directly from Antigravity's language server or Google Cloud Code.
+/// It never launches `agy`, so a background refresh cannot start an OAuth browser flow.
 final class AntigravityUsageService {
     static let shared = AntigravityUsageService()
-    private init() {}
 
+    private static let languageServerService = "exa.language_server_pb.LanguageServerService"
+    private static let cloudCodeBases = [
+        "https://daily-cloudcode-pa.googleapis.com",
+        "https://cloudcode-pa.googleapis.com"
+    ]
+    private static let quotaSummaryPath = "/v1internal:retrieveUserQuotaSummary"
+    private static let fetchModelsPath = "/v1internal:fetchAvailableModels"
+    private static let loadCodeAssistPath = "/v1internal:loadCodeAssist"
+    private static let retrieveQuotaPath = "/v1internal:retrieveUserQuota"
+
+    private let credentialStore = AntigravityCredentialStore.shared
+    private let discovery = LanguageServerDiscovery()
+    private let oauthClientDiscovery = AntigravityOAuthClientDiscovery()
     private let localSession = URLSession(
         configuration: .ephemeral,
         delegate: LoopbackTrustDelegate(),
         delegateQueue: nil
     )
 
-    func fetchUsage() async throws -> AntigravityUsageData {
-        let ports = agyListeningPorts()
-        if !ports.isEmpty {
-            return try await fetchUsage(from: ports)
+    private init() {}
+
+    func fetchUsage(allowKeychainInteraction: Bool = false) async throws -> AntigravityUsageData {
+        if let usage = await probeLanguageServer(
+            processName: "language_server",
+            markers: ["antigravity", "antigravity-ide"],
+            csrfFlag: "--csrf_token",
+            portFlag: "--extension_server_port"
+        ) {
+            print("[Antigravity] 使用 Antigravity language server")
+            return usage
         }
-
-        guard let cliPath = agyCLIPath() else {
-            throw AntigravityUsageServiceError.cliNotInstalled
+        if let usage = await probeLanguageServer(
+            processName: "agy",
+            markers: [],
+            csrfFlag: "",
+            portFlag: nil
+        ) {
+            print("[Antigravity] 使用 agy language server")
+            return usage
         }
-
-        let backgroundSession = try AgyBackgroundSession(binaryPath: cliPath)
-        defer { backgroundSession.stop() }
-
-        try backgroundSession.start()
-        return try await waitForUsageFromLaunchedCLI(backgroundSession)
+        let usage = try await probeCloudCode(allowKeychainInteraction: allowKeychainInteraction)
+        print("[Antigravity] 使用 Keychain OAuth + Cloud Code API")
+        return usage
     }
 
-    private func fetchUsage(from ports: [Int]) async throws -> AntigravityUsageData {
-        var lastError: Error?
-        for port in ports {
-            do {
-                let data = try await fetchQuotaSummary(port: port)
-                let groups = try parseGroups(from: data)
-                return AntigravityUsageData(
-                    gemini: groups.first(where: { $0.displayName.localizedCaseInsensitiveContains("gemini") }),
-                    claudeAndGPT: groups.first(where: { group in
-                        let name = group.displayName.lowercased()
-                        return name.contains("claude") || name.contains("gpt")
-                    })
-                )
-            } catch {
-                lastError = error
+    // MARK: - Language server
+
+    private func probeLanguageServer(
+        processName: String,
+        markers: [String],
+        csrfFlag: String,
+        portFlag: String?
+    ) async -> AntigravityUsageData? {
+        let options = LanguageServerDiscovery.Options(
+            processName: processName,
+            markers: markers,
+            csrfFlag: csrfFlag,
+            portFlag: portFlag
+        )
+        let discovery = self.discovery
+        guard let endpoint = await Task.detached(priority: .utility, operation: {
+            discovery.discover(options)
+        }).value else { return nil }
+
+        var addresses = endpoint.ports.flatMap { [(scheme: "https", port: $0), (scheme: "http", port: $0)] }
+        if let extensionPort = endpoint.extensionPort {
+            addresses.append((scheme: "http", port: extensionPort))
+        }
+
+        for address in addresses {
+            if let response = await callLanguageServer(
+                scheme: address.scheme,
+                port: address.port,
+                csrfToken: endpoint.csrfToken,
+                method: "RetrieveUserQuotaSummary"
+            ), response.statusCode == 200,
+               let usage = parseQuotaSummary(response.data) {
+                return usage
+            }
+
+            if let response = await callLanguageServer(
+                scheme: address.scheme,
+                port: address.port,
+                csrfToken: endpoint.csrfToken,
+                method: "GetUserStatus"
+            ), response.statusCode == 200 {
+                let models = parseLanguageServerStatus(response.data)
+                if !models.isEmpty { return buildLegacyUsage(models) }
+            }
+
+            if let response = await callLanguageServer(
+                scheme: address.scheme,
+                port: address.port,
+                csrfToken: endpoint.csrfToken,
+                method: "GetCommandModelConfigs"
+            ), response.statusCode == 200 {
+                let models = parseLanguageServerModels(response.data)
+                if !models.isEmpty { return buildLegacyUsage(models) }
             }
         }
-        throw lastError ?? AntigravityUsageServiceError.invalidPayload
+        return nil
     }
 
-    private func waitForUsageFromLaunchedCLI(_ backgroundSession: AgyBackgroundSession) async throws -> AntigravityUsageData {
-        let deadline = Date().addingTimeInterval(15)
-        var lastError: Error?
-
-        while Date() < deadline {
-            backgroundSession.drainOutput()
-            let ports = agyListeningPorts()
-            if !ports.isEmpty {
-                do {
-                    return try await fetchUsage(from: ports)
-                } catch {
-                    lastError = error
-                }
-            }
-
-            try? await Task.sleep(for: .milliseconds(250))
+    private func callLanguageServer(
+        scheme: String,
+        port: Int,
+        csrfToken: String,
+        method: String
+    ) async -> ServiceResponse? {
+        guard let url = URL(string: "\(scheme)://127.0.0.1:\(port)/\(Self.languageServerService)/\(method)") else {
+            return nil
         }
-
-        if let lastError { throw lastError }
-        throw AntigravityUsageServiceError.startupTimedOut
-    }
-
-    // MARK: - agy Local Server
-
-    private func agyListeningPorts() -> [Int] {
-        let task = Process()
-        let output = Pipe()
-        task.executableURL = URL(fileURLWithPath: "/usr/sbin/lsof")
-        task.arguments = ["-nP", "-a", "-c", "agy", "-iTCP", "-sTCP:LISTEN"]
-        task.standardOutput = output
-        task.standardError = FileHandle.nullDevice
-
-        do {
-            try task.run()
-            task.waitUntilExit()
-        } catch {
-            return []
-        }
-        guard task.terminationStatus == 0,
-              let text = String(data: output.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) else {
-            return []
-        }
-
-        let pattern = "127\\.0\\.0\\.1:([0-9]+)"
-        guard let expression = try? NSRegularExpression(pattern: pattern) else { return [] }
-        let range = NSRange(text.startIndex..., in: text)
-        let ports = expression.matches(in: text, range: range).compactMap { match -> Int? in
-            guard let valueRange = Range(match.range(at: 1), in: text) else { return nil }
-            return Int(text[valueRange])
-        }
-        return Array(Set(ports)).sorted()
-    }
-
-    private func agyCLIPath() -> String? {
-        let environment = ProcessInfo.processInfo.environment
-        var candidates: [String] = []
-
-        if let configuredPath = environment["ANTIGRAVITY_CLI_PATH"] {
-            candidates.append(configuredPath)
-        }
-
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        candidates.append(contentsOf: [
-            "\(home)/.local/bin/agy",
-            "/opt/homebrew/bin/agy",
-            "/usr/local/bin/agy"
-        ])
-
-        if let path = environment["PATH"] {
-            candidates.append(contentsOf: path.split(separator: ":").map { "\($0)/agy" })
-        }
-
-        return candidates.first { path in
-            FileManager.default.isExecutableFile(atPath: path)
-        }
-    }
-
-    private func fetchQuotaSummary(port: Int) async throws -> Data {
-        var components = URLComponents()
-        components.scheme = "https"
-        components.host = "127.0.0.1"
-        components.port = port
-        components.path = "/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary"
-        guard let url = components.url else { throw AntigravityUsageServiceError.invalidPayload }
-
+        let metadata: [String: String] = [
+            "ideName": "antigravity",
+            "extensionName": "antigravity",
+            "ideVersion": "unknown",
+            "locale": "en"
+        ]
+        let body = try? JSONSerialization.data(withJSONObject: ["metadata": metadata])
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
+        request.httpBody = body
+        request.timeoutInterval = 8
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("1", forHTTPHeaderField: "Connect-Protocol-Version")
-        request.timeoutInterval = 5
-        request.httpBody = Data("{}".utf8)
+        if !csrfToken.isEmpty {
+            request.setValue(csrfToken, forHTTPHeaderField: "x-codeium-csrf-token")
+        }
 
-        let (data, response): (Data, URLResponse)
-        do {
-            (data, response) = try await localSession.data(for: request)
-        } catch {
-            throw AntigravityUsageServiceError.networkError(error)
-        }
-        guard let http = response as? HTTPURLResponse else {
-            throw AntigravityUsageServiceError.invalidResponse(0)
-        }
-        guard http.statusCode == 200 else {
-            throw AntigravityUsageServiceError.invalidResponse(http.statusCode)
-        }
-        return data
+        guard let (data, response) = try? await localSession.data(for: request),
+              let http = response as? HTTPURLResponse else { return nil }
+        return ServiceResponse(data: data, statusCode: http.statusCode)
     }
 
-    // MARK: - Response Parsing
+    // MARK: - Cloud Code
 
-    private func parseGroups(from data: Data) throws -> [AntigravityQuotaGroup] {
-        guard let outer = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            throw AntigravityUsageServiceError.invalidPayload
-        }
-        // Connect protocol responses wrap the language-server payload in `response`.
-        let raw = outer["response"] as? [String: Any] ?? outer
-        guard let rawGroups = raw["groups"] as? [[String: Any]] else {
-            throw AntigravityUsageServiceError.invalidPayload
-        }
+    private func probeCloudCode(allowKeychainInteraction: Bool) async throws -> AntigravityUsageData {
+        let store = credentialStore
+        let credential = try store.load(allowInteraction: allowKeychainInteraction)
+        guard let credential else { throw AntigravityUsageServiceError.authenticationRequired }
 
-        let groups = rawGroups.compactMap { rawGroup -> AntigravityQuotaGroup? in
-            guard let displayName = rawGroup["displayName"] as? String,
-                  let rawBuckets = rawGroup["buckets"] as? [[String: Any]] else {
-                return nil
+        var tokens: [String] = []
+        if let token = store.usableAccessToken(from: credential) { tokens.append(token) }
+        if let token = store.cachedToken(matching: credential), !tokens.contains(token) { tokens.append(token) }
+
+        var sawAuthenticationFailure = false
+        for token in tokens {
+            switch await fetchCloudCode(token: token) {
+            case .success(let usage): return usage
+            case .authenticationFailed: sawAuthenticationFailure = true
+            case .unavailable: continue
             }
+        }
 
-            var fiveHour: AntigravityUsageWindow?
-            var weekly: AntigravityUsageWindow?
-            for bucket in rawBuckets {
-                guard let window = parseWindow(bucket) else { continue }
-                let descriptor = [bucket["window"], bucket["displayName"], bucket["bucketId"]]
-                    .compactMap { $0 as? String }
-                    .joined(separator: " ")
-                    .lowercased()
-
-                if descriptor.contains("week") {
-                    weekly = window
-                } else if descriptor.contains("hour") || descriptor.contains("5h") {
-                    fiveHour = window
+        if (tokens.isEmpty || sawAuthenticationFailure), let refreshToken = credential.refreshToken {
+            switch await refreshGoogleToken(refreshToken) {
+            case .success(let token, let expiresIn):
+                store.cache(accessToken: token, expiresIn: expiresIn, refreshToken: refreshToken)
+                switch await fetchCloudCode(token: token) {
+                case .success(let usage): return usage
+                case .authenticationFailed: throw AntigravityUsageServiceError.authenticationRequired
+                case .unavailable: throw AntigravityUsageServiceError.unavailable
                 }
+            case .authenticationFailed:
+                store.discardCache()
+                throw AntigravityUsageServiceError.authenticationRequired
+            case .unavailable:
+                throw AntigravityUsageServiceError.unavailable
             }
+        }
 
-            guard fiveHour != nil || weekly != nil else { return nil }
-            return AntigravityQuotaGroup(
-                displayName: displayName,
-                fiveHour: fiveHour,
-                weekly: weekly
+        if sawAuthenticationFailure { throw AntigravityUsageServiceError.authenticationRequired }
+        throw AntigravityUsageServiceError.unavailable
+    }
+
+    private func fetchCloudCode(token: String) async -> CloudProbeResult {
+        switch await postCloudCode(path: Self.quotaSummaryPath, token: token, userAgent: "antigravity", body: [:]) {
+        case .authenticationFailed: return .authenticationFailed
+        case .success(let data):
+            if let usage = parseQuotaSummary(data) { return .success(usage) }
+        case .unavailable: break
+        }
+
+        switch await postCloudCode(path: Self.fetchModelsPath, token: token, userAgent: "antigravity", body: [:]) {
+        case .authenticationFailed: return .authenticationFailed
+        case .success(let data):
+            let models = parseCloudModels(data)
+            if !models.isEmpty { return .success(buildLegacyUsage(models)) }
+        case .unavailable: break
+        }
+
+        var project: String?
+        switch await postCloudCode(path: Self.loadCodeAssistPath, token: token, userAgent: "agy", body: [:]) {
+        case .authenticationFailed: return .authenticationFailed
+        case .success(let data): project = parseProject(data)
+        case .unavailable: break
+        }
+
+        var quota = await postCloudCode(
+            path: Self.retrieveQuotaPath,
+            token: token,
+            userAgent: "agy",
+            body: project.map { ["project": $0] } ?? [:]
+        )
+        if case .unavailable = quota, project != nil {
+            quota = await postCloudCode(path: Self.retrieveQuotaPath, token: token, userAgent: "agy", body: [:])
+        }
+        switch quota {
+        case .authenticationFailed: return .authenticationFailed
+        case .success(let data):
+            let models = parseQuotaModels(data)
+            if !models.isEmpty { return .success(buildLegacyUsage(models)) }
+        case .unavailable: break
+        }
+        return .unavailable
+    }
+
+    private func postCloudCode(
+        path: String,
+        token: String,
+        userAgent: String,
+        body: [String: String]
+    ) async -> CloudResponse {
+        let payload = (try? JSONSerialization.data(withJSONObject: body)) ?? Data("{}".utf8)
+        for base in Self.cloudCodeBases {
+            guard let url = URL(string: base + path) else { continue }
+            var request = URLRequest(url: url)
+            request.httpMethod = "POST"
+            request.httpBody = payload
+            request.timeoutInterval = 15
+            request.setValue("application/json", forHTTPHeaderField: "Accept")
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+            request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+
+            guard let (data, response) = try? await URLSession.shared.data(for: request),
+                  let http = response as? HTTPURLResponse else { continue }
+            if http.statusCode == 401 || http.statusCode == 403 { return .authenticationFailed }
+            if (200..<300).contains(http.statusCode) { return .success(data) }
+        }
+        return .unavailable
+    }
+
+    private func refreshGoogleToken(_ refreshToken: String) async -> TokenRefreshResult {
+        guard let url = URL(string: "https://oauth2.googleapis.com/token") else { return .unavailable }
+        let discovery = oauthClientDiscovery
+        guard let client = await Task.detached(priority: .utility, operation: {
+            discovery.discover()
+        }).value else { return .unavailable }
+        let fields = [
+            "client_id=\(client.id.formEncoded)",
+            "client_secret=\(client.secret.formEncoded)",
+            "refresh_token=\(refreshToken.formEncoded)",
+            "grant_type=refresh_token"
+        ]
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.httpBody = Data(fields.joined(separator: "&").utf8)
+        request.timeoutInterval = 15
+        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+
+        guard let (data, response) = try? await URLSession.shared.data(for: request),
+              let http = response as? HTTPURLResponse else { return .unavailable }
+        if (200..<300).contains(http.statusCode),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let token = json["access_token"] as? String {
+            return .success(token, (json["expires_in"] as? NSNumber)?.doubleValue ?? 3_600)
+        }
+        if (400..<500).contains(http.statusCode), http.statusCode != 408, http.statusCode != 429 {
+            return .authenticationFailed
+        }
+        return .unavailable
+    }
+
+    // MARK: - Mapping
+
+    private func parseQuotaSummary(_ data: Data) -> AntigravityUsageData? {
+        guard let outer = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        let root = outer["response"] as? [String: Any] ?? outer
+        guard let groups = root["groups"] as? [[String: Any]] else { return nil }
+
+        var windows: [String: AntigravityUsageWindow] = [:]
+        let accepted = Set(["gemini-5h", "gemini-weekly", "3p-5h", "3p-weekly"])
+        for bucket in groups.flatMap({ $0["buckets"] as? [[String: Any]] ?? [] }) {
+            guard let identifier = bucket["bucketId"] as? String,
+                  accepted.contains(identifier),
+                  windows[identifier] == nil,
+                  let remaining = number(bucket["remainingFraction"]) else { continue }
+            windows[identifier] = usageWindow(remaining: remaining, resetValue: bucket["resetTime"])
+        }
+
+        return makeUsage(
+            geminiFiveHour: windows["gemini-5h"],
+            geminiWeekly: windows["gemini-weekly"],
+            thirdPartyFiveHour: windows["3p-5h"],
+            thirdPartyWeekly: windows["3p-weekly"]
+        )
+    }
+
+    private func parseLanguageServerStatus(_ data: Data) -> [NormalizedModel] {
+        guard let outer = dictionary(data),
+              let status = outer["userStatus"] as? [String: Any],
+              let cascade = status["cascadeModelConfigData"] as? [String: Any],
+              let configs = cascade["clientModelConfigs"] as? [[String: Any]] else { return [] }
+        return normalizeModels(configs)
+    }
+
+    private func parseLanguageServerModels(_ data: Data) -> [NormalizedModel] {
+        guard let configs = dictionary(data)?["clientModelConfigs"] as? [[String: Any]] else { return [] }
+        return normalizeModels(configs)
+    }
+
+    private func parseCloudModels(_ data: Data) -> [NormalizedModel] {
+        guard let models = dictionary(data)?["models"] as? [String: Any] else { return [] }
+        return models.compactMap { identifier, value in
+            guard let object = value as? [String: Any], object["isInternal"] as? Bool != true else { return nil }
+            return normalizedModel(object, fallbackIdentifier: identifier)
+        }
+    }
+
+    private func parseQuotaModels(_ data: Data) -> [NormalizedModel] {
+        guard let buckets = dictionary(data)?["buckets"] as? [[String: Any]] else { return [] }
+        return buckets.compactMap { bucket in
+            guard let identifier = bucket["modelId"] as? String else { return nil }
+            return NormalizedModel(
+                label: identifier,
+                identifier: identifier,
+                remaining: number(bucket["remainingFraction"]) ?? 0,
+                resetAt: parseDate(bucket["resetTime"])
             )
         }
-
-        guard !groups.isEmpty else { throw AntigravityUsageServiceError.invalidPayload }
-        return groups
     }
 
-    private func parseWindow(_ bucket: [String: Any]) -> AntigravityUsageWindow? {
-        let remaining = number(bucket["remainingFraction"])
-            ?? (bucket["remaining"] as? [String: Any]).flatMap { number($0["remainingFraction"]) }
-        guard let remaining else { return nil }
+    private func parseProject(_ data: Data) -> String? {
+        dictionary(data)?["cloudaicompanionProject"] as? String
+    }
 
-        return AntigravityUsageWindow(
+    private func dictionary(_ data: Data) -> [String: Any]? {
+        guard let outer = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        return outer["response"] as? [String: Any] ?? outer
+    }
+
+    private func normalizeModels(_ configs: [[String: Any]]) -> [NormalizedModel] {
+        configs.compactMap { normalizedModel($0, fallbackIdentifier: nil) }
+    }
+
+    private func normalizedModel(_ object: [String: Any], fallbackIdentifier: String?) -> NormalizedModel? {
+        let label = (object["displayName"] as? String) ?? (object["label"] as? String)
+        guard let label, !label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        let modelOrAlias = object["modelOrAlias"] as? [String: Any]
+        let identifier = (object["model"] as? String) ?? (modelOrAlias?["model"] as? String) ?? fallbackIdentifier
+        let quota = object["quotaInfo"] as? [String: Any]
+        return NormalizedModel(
+            label: label,
+            identifier: identifier,
+            remaining: number(quota?["remainingFraction"]) ?? 0,
+            resetAt: parseDate(quota?["resetTime"])
+        )
+    }
+
+    private func buildLegacyUsage(_ models: [NormalizedModel]) -> AntigravityUsageData {
+        let blacklist = Set([
+            "MODEL_CHAT_20706", "MODEL_CHAT_23310",
+            "MODEL_GOOGLE_GEMINI_2_5_FLASH", "MODEL_GOOGLE_GEMINI_2_5_FLASH_THINKING",
+            "MODEL_GOOGLE_GEMINI_2_5_FLASH_LITE", "MODEL_GOOGLE_GEMINI_2_5_PRO",
+            "MODEL_PLACEHOLDER_M19", "MODEL_PLACEHOLDER_M9", "MODEL_PLACEHOLDER_M12"
+        ])
+        var gemini: NormalizedModel?
+        var thirdParty: NormalizedModel?
+
+        for model in models where model.identifier.map({ !blacklist.contains($0) }) ?? true {
+            if model.label.lowercased().contains("gemini") {
+                if gemini == nil || model.remaining < gemini!.remaining { gemini = model }
+            } else if thirdParty == nil || model.remaining < thirdParty!.remaining {
+                thirdParty = model
+            }
+        }
+
+        return makeUsage(
+            geminiFiveHour: gemini.map { usageWindow(remaining: $0.remaining, resetValue: $0.resetAt) },
+            geminiWeekly: nil,
+            thirdPartyFiveHour: thirdParty.map { usageWindow(remaining: $0.remaining, resetValue: $0.resetAt) },
+            thirdPartyWeekly: nil
+        )
+    }
+
+    private func makeUsage(
+        geminiFiveHour: AntigravityUsageWindow?,
+        geminiWeekly: AntigravityUsageWindow?,
+        thirdPartyFiveHour: AntigravityUsageWindow?,
+        thirdPartyWeekly: AntigravityUsageWindow?
+    ) -> AntigravityUsageData {
+        AntigravityUsageData(
+            gemini: geminiFiveHour == nil && geminiWeekly == nil ? nil : AntigravityQuotaGroup(
+                displayName: "Gemini Models",
+                fiveHour: geminiFiveHour,
+                weekly: geminiWeekly
+            ),
+            claudeAndGPT: thirdPartyFiveHour == nil && thirdPartyWeekly == nil ? nil : AntigravityQuotaGroup(
+                displayName: "Claude and GPT Models",
+                fiveHour: thirdPartyFiveHour,
+                weekly: thirdPartyWeekly
+            )
+        )
+    }
+
+    private func usageWindow(remaining: Double, resetValue: Any?) -> AntigravityUsageWindow {
+        AntigravityUsageWindow(
             usedPercent: min(max((1 - remaining) * 100, 0), 100),
-            resetAt: parseDate(bucket["resetTime"])
+            resetAt: resetValue as? Date ?? parseDate(resetValue)
         )
     }
 
     private func parseDate(_ value: Any?) -> Date? {
+        if let date = value as? Date { return date }
         if let seconds = number(value) {
             return Date(timeIntervalSince1970: seconds > 100_000_000_000 ? seconds / 1_000 : seconds)
         }
@@ -258,131 +465,48 @@ final class AntigravityUsageService {
     }
 }
 
-/// Owns only the short-lived `agy` process launched by AIUsageBar. A pseudo-terminal
-/// is required because `agy` starts its local language server from an interactive CLI.
-private final class AgyBackgroundSession {
-    private let binaryPath: String
-    private var processID: pid_t = 0
-    private var primaryFD: Int32 = -1
+private struct ServiceResponse {
+    let data: Data
+    let statusCode: Int
+}
 
-    init(binaryPath: String) throws {
-        self.binaryPath = binaryPath
-    }
+private struct NormalizedModel {
+    let label: String
+    let identifier: String?
+    let remaining: Double
+    let resetAt: Date?
+}
 
-    deinit {
-        stop()
-    }
+private enum CloudProbeResult {
+    case success(AntigravityUsageData)
+    case authenticationFailed
+    case unavailable
+}
 
-    func start() throws {
-        var primaryFD: Int32 = -1
-        var secondaryFD: Int32 = -1
-        var windowSize = winsize(ws_row: 50, ws_col: 160, ws_xpixel: 0, ws_ypixel: 0)
+private enum CloudResponse {
+    case success(Data)
+    case authenticationFailed
+    case unavailable
+}
 
-        guard openpty(&primaryFD, &secondaryFD, nil, nil, &windowSize) == 0 else {
-            throw AntigravityUsageServiceError.startupTimedOut
-        }
-        _ = fcntl(primaryFD, F_SETFL, O_NONBLOCK)
+private enum TokenRefreshResult {
+    case success(String, TimeInterval)
+    case authenticationFailed
+    case unavailable
+}
 
-        var fileActions: posix_spawn_file_actions_t?
-        guard posix_spawn_file_actions_init(&fileActions) == 0 else {
-            close(primaryFD)
-            close(secondaryFD)
-            throw AntigravityUsageServiceError.startupTimedOut
-        }
-        defer { posix_spawn_file_actions_destroy(&fileActions) }
-
-        posix_spawn_file_actions_adddup2(&fileActions, secondaryFD, STDIN_FILENO)
-        posix_spawn_file_actions_adddup2(&fileActions, secondaryFD, STDOUT_FILENO)
-        posix_spawn_file_actions_adddup2(&fileActions, secondaryFD, STDERR_FILENO)
-        posix_spawn_file_actions_addclose(&fileActions, primaryFD)
-        posix_spawn_file_actions_addclose(&fileActions, secondaryFD)
-        _ = NSHomeDirectory().withCString {
-            posix_spawn_file_actions_addchdir(&fileActions, $0)
-        }
-
-        var attributes: posix_spawnattr_t?
-        guard posix_spawnattr_init(&attributes) == 0 else {
-            close(primaryFD)
-            close(secondaryFD)
-            throw AntigravityUsageServiceError.startupTimedOut
-        }
-        defer { posix_spawnattr_destroy(&attributes) }
-        posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_CLOEXEC_DEFAULT))
-        posix_spawnattr_setpgroup(&attributes, 0)
-
-        var environment = ProcessInfo.processInfo.environment
-        environment["PWD"] = NSHomeDirectory()
-        environment["TERM"] = "xterm-256color"
-        environment["CI"] = "0"
-
-        var arguments = [strdup(binaryPath), nil]
-        defer {
-            for case let pointer? in arguments {
-                free(UnsafeMutableRawPointer(pointer))
-            }
-        }
-        var environmentPointers = environment.map { strdup("\($0.key)=\($0.value)") }
-        environmentPointers.append(nil)
-        defer {
-            for case let pointer? in environmentPointers {
-                free(UnsafeMutableRawPointer(pointer))
-            }
-        }
-
-        var pid: pid_t = 0
-        let result = binaryPath.withCString { executablePath in
-            posix_spawn(&pid, executablePath, &fileActions, &attributes, &arguments, &environmentPointers)
-        }
-        close(secondaryFD)
-
-        guard result == 0 else {
-            close(primaryFD)
-            throw AntigravityUsageServiceError.startupTimedOut
-        }
-
-        self.processID = pid
-        self.primaryFD = primaryFD
-    }
-
-    func drainOutput() {
-        guard primaryFD >= 0 else { return }
-        var buffer = [UInt8](repeating: 0, count: 8_192)
-        while read(primaryFD, &buffer, buffer.count) > 0 {}
-    }
-
-    func stop() {
-        let pid = processID
-        guard pid > 0 else {
-            closePrimaryFD()
-            return
-        }
-
-        kill(-pid, SIGTERM)
-        var status: Int32 = 0
-        for _ in 0..<5 {
-            if waitpid(pid, &status, WNOHANG) == pid { break }
-            usleep(50_000)
-        }
-        if waitpid(pid, &status, WNOHANG) == 0 {
-            kill(-pid, SIGKILL)
-            _ = waitpid(pid, &status, 0)
-        }
-
-        processID = 0
-        closePrimaryFD()
-    }
-
-    private func closePrimaryFD() {
-        guard primaryFD >= 0 else { return }
-        close(primaryFD)
-        primaryFD = -1
+private extension String {
+    var formEncoded: String {
+        addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? self
     }
 }
 
 private final class LoopbackTrustDelegate: NSObject, URLSessionDelegate {
-    func urlSession(_ session: URLSession,
-                    didReceive challenge: URLAuthenticationChallenge,
-                    completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+    func urlSession(
+        _ session: URLSession,
+        didReceive challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+    ) {
         let host = challenge.protectionSpace.host
         if challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
            (host == "127.0.0.1" || host == "localhost"),

@@ -29,21 +29,27 @@ final class UsageViewModel: ObservableObject {
     }
 
     // MARK: - Public: Manual Trigger
-    func refresh() {
-        Task { await fetchUsage() }
+    func refresh(allowKeychainInteraction: Bool = false) {
+        Task { await fetchUsage(allowKeychainInteraction: allowKeychainInteraction) }
     }
 
     // MARK: - Private: Fetch Data
-    private func fetchUsage() async {
+    private func fetchUsage(allowKeychainInteraction: Bool = false) async {
         guard !isLoading else { return }
         isLoading = true
         errorMessage = nil
         codexErrorMessage = nil
         antigravityErrorMessage = nil
 
-        async let claudeResult = fetchClaudeResult()
-        async let codexResult = fetchCodexResult()
-        async let antigravityResult = fetchAntigravityResult()
+        async let claudeResult = fetchClaudeResult(
+            allowKeychainInteraction: allowKeychainInteraction
+        )
+        async let codexResult = fetchCodexResult(
+            allowKeychainInteraction: allowKeychainInteraction
+        )
+        async let antigravityResult = fetchAntigravityResult(
+            allowKeychainInteraction: allowKeychainInteraction
+        )
 
         let (claude, codex, antigravity) = await (claudeResult, codexResult, antigravityResult)
         var hasFreshSuccess = false
@@ -122,26 +128,42 @@ final class UsageViewModel: ObservableObject {
         WidgetSnapshotStore.save(snapshot)
     }
 
-    private func fetchClaudeResult() async -> Result<UsageData, Error> {
+    private func fetchClaudeResult(allowKeychainInteraction: Bool) async -> Result<UsageData, Error> {
         do {
-            return .success(try await ClaudeService.shared.fetchUsage())
+            return .success(
+                try await ClaudeService.shared.fetchUsage(
+                    allowKeychainInteraction: allowKeychainInteraction
+                )
+            )
         } catch {
             print("❌ [ClaudeService] 錯誤：\(error.localizedDescription)")
             return .failure(error)
         }
     }
 
-    private func fetchCodexResult() async -> Result<CodexUsageData, Error> {
+    private func fetchCodexResult(
+        allowKeychainInteraction: Bool
+    ) async -> Result<CodexUsageData, Error> {
         do {
-            return .success(try await CodexUsageService.shared.fetchUsage())
+            return .success(
+                try await CodexUsageService.shared.fetchUsage(
+                    allowKeychainInteraction: allowKeychainInteraction
+                )
+            )
         } catch {
             return .failure(error)
         }
     }
 
-    private func fetchAntigravityResult() async -> Result<AntigravityUsageData, Error> {
+    private func fetchAntigravityResult(
+        allowKeychainInteraction: Bool
+    ) async -> Result<AntigravityUsageData, Error> {
         do {
-            return .success(try await AntigravityUsageService.shared.fetchUsage())
+            return .success(
+                try await AntigravityUsageService.shared.fetchUsage(
+                    allowKeychainInteraction: allowKeychainInteraction
+                )
+            )
         } catch {
             return .failure(error)
         }
