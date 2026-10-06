@@ -129,7 +129,7 @@ final class StatusBarController {
     }
 
     @objc private func doRefresh() {
-        viewModel.refresh()
+        viewModel.refresh(allowKeychainInteraction: true)
     }
 
     @objc private func doQuit() {

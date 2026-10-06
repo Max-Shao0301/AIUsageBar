@@ -15,7 +15,8 @@ struct ClaudeOAuthCredentials: Codable {
     /// Whether the token has expired (treated as expired 60 seconds early to avoid race conditions)
     var isExpired: Bool {
         guard let expiresAt else { return false }
-        return Date().timeIntervalSince1970 > (expiresAt - 60)
+        let expirySeconds = expiresAt > 100_000_000_000 ? expiresAt / 1_000 : expiresAt
+        return Date().timeIntervalSince1970 > (expirySeconds - 300)
     }
 }
 

@@ -1,67 +1,270 @@
+import CryptoKit
 import Foundation
+import LocalAuthentication
+import Security
 
-// MARK: - Errors
 enum CodexUsageServiceError: Error, LocalizedError {
     case notSignedIn
     case networkError(Error)
     case unauthorized
+    case invalidResponse(Int)
+    case decodingError(Error)
+    case credentialsChanged
 
     var errorDescription: String? {
         switch self {
         case .notSignedIn:
             return "找不到 Codex 登入憑證。\n請確認已安裝並登入 Codex CLI。"
-        case .networkError(let e):
-            return "網路錯誤：\(e.localizedDescription)"
+        case .networkError(let error):
+            return "網路錯誤：\(error.localizedDescription)"
         case .unauthorized:
             return "授權失效，請重新登入 Codex。"
+        case .invalidResponse(let status):
+            return "Codex 用量服務回傳錯誤 HTTP \(status)。"
+        case .decodingError(let error):
+            return "Codex 用量資料解析失敗：\(error.localizedDescription)"
+        case .credentialsChanged:
+            return "Codex 登入資料剛剛已更新，稍後會自動重試。"
         }
     }
 }
 
-// MARK: - CodexUsageService
 final class CodexUsageService {
     static let shared = CodexUsageService()
+
+    private let oauthClientID = "app_EMoamEEZ73f0CkXaXp7hrann"
+    private let keychainService = "Codex Auth"
+
     private init() {}
 
-    private let authFilePath = NSHomeDirectory() + "/.codex/auth.json"
-    private let oauthClientId = "app_EMoamEEZ73f0CkXaXp7hrann"
+    func fetchUsage(allowKeychainInteraction: Bool = false) async throws -> CodexUsageData {
+        let candidates = loadAuthCandidates(allowKeychainInteraction: allowKeychainInteraction)
+        guard !candidates.isEmpty else { throw CodexUsageServiceError.notSignedIn }
 
-    // MARK: - Public
-
-    func fetchUsage() async throws -> CodexUsageData {
-        guard let auth = loadAuthFile() else {
-            throw CodexUsageServiceError.notSignedIn
+        var lastAuthError: Error?
+        for state in candidates {
+            do {
+                let result = try await fetchUsageWithOAuth(
+                    state: state,
+                    allowKeychainInteraction: allowKeychainInteraction
+                )
+                print("[CodexUsageService] 使用 \(state.source.label)")
+                return result
+            } catch CodexUsageServiceError.unauthorized {
+                lastAuthError = CodexUsageServiceError.unauthorized
+            } catch CodexUsageServiceError.credentialsChanged {
+                lastAuthError = CodexUsageServiceError.credentialsChanged
+            }
         }
-        let result = try await fetchUsageWithOAuth(auth: auth)
-        print("[CodexUsageService] 使用 OAuth API")
-        return result
+        throw lastAuthError ?? CodexUsageServiceError.unauthorized
     }
 
-    // MARK: - Auth File
+    // MARK: - Authentication sources
 
-    private struct CodexAuthFile: Codable {
-        let tokens: Tokens
+    private struct AuthTokens {
+        var accessToken: String
+        var refreshToken: String?
+        var accountID: String?
+        var idToken: String?
+    }
 
-        struct Tokens: Codable {
-            let accessToken:  String
-            let refreshToken: String?
-            let accountId:    String?
+    private struct AuthState {
+        var tokens: AuthTokens
+        var raw: [String: Any]
+        let source: AuthSource
+    }
 
-            enum CodingKeys: String, CodingKey {
-                case accessToken  = "access_token"
-                case refreshToken = "refresh_token"
-                case accountId    = "account_id"
+    private enum AuthSource {
+        case file(URL)
+        case keychain(account: String)
+
+        var label: String {
+            switch self {
+            case .file: return "Codex auth.json"
+            case .keychain: return "Codex Keychain"
+            }
+        }
+    }
+
+    private func loadAuthCandidates(allowKeychainInteraction: Bool) -> [AuthState] {
+        var candidates: [AuthState] = []
+        let homes = codexHomes()
+
+        for home in homes {
+            let url = URL(fileURLWithPath: home).appendingPathComponent("auth.json")
+            if let state = loadFile(url), !contains(state, in: candidates) {
+                candidates.append(state)
             }
         }
 
-        enum CodingKeys: String, CodingKey {
-            case tokens
+        for home in homes {
+            let account = keychainAccount(for: home)
+            if let state = loadKeychain(
+                account: account,
+                allowInteraction: allowKeychainInteraction
+            ), !contains(state, in: candidates) {
+                candidates.append(state)
+            }
+        }
+        return candidates
+    }
+
+    private func codexHomes() -> [String] {
+        var values: [String] = []
+        if let configured = ProcessInfo.processInfo.environment["CODEX_HOME"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !configured.isEmpty {
+            values.append((configured as NSString).expandingTildeInPath)
+        }
+        values.append((("~/.codex") as NSString).expandingTildeInPath)
+        values.append((("~/.config/codex") as NSString).expandingTildeInPath)
+
+        var seen = Set<String>()
+        return values.filter { seen.insert(URL(fileURLWithPath: $0).standardizedFileURL.path).inserted }
+    }
+
+    private func contains(_ candidate: AuthState, in states: [AuthState]) -> Bool {
+        states.contains {
+            $0.tokens.accessToken == candidate.tokens.accessToken &&
+            $0.tokens.accountID == candidate.tokens.accountID
         }
     }
 
-    private func loadAuthFile() -> CodexAuthFile? {
-        guard let data = try? Data(contentsOf: URL(fileURLWithPath: authFilePath)) else { return nil }
-        return try? JSONDecoder().decode(CodexAuthFile.self, from: data)
+    private func loadFile(_ url: URL) -> AuthState? {
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        return parseAuth(data, source: .file(url))
+    }
+
+    private func loadKeychain(account: String, allowInteraction: Bool) -> AuthState? {
+        let context = LAContext()
+        context.interactionNotAllowed = !allowInteraction
+        let query: [CFString: Any] = [
+            kSecClass: kSecClassGenericPassword,
+            kSecAttrService: keychainService,
+            kSecAttrAccount: account,
+            kSecReturnData: true,
+            kSecMatchLimit: kSecMatchLimitOne,
+            kSecUseAuthenticationContext: context
+        ]
+        var result: AnyObject?
+        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
+              let data = result as? Data else { return nil }
+        return parseAuth(data, source: .keychain(account: account))
+    }
+
+    private func parseAuth(_ data: Data, source: AuthSource) -> AuthState? {
+        guard let raw = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let tokens = raw["tokens"] as? [String: Any],
+              let accessToken = tokens["access_token"] as? String,
+              !accessToken.isEmpty else { return nil }
+
+        return AuthState(
+            tokens: AuthTokens(
+                accessToken: accessToken,
+                refreshToken: tokens["refresh_token"] as? String,
+                accountID: tokens["account_id"] as? String,
+                idToken: tokens["id_token"] as? String
+            ),
+            raw: raw,
+            source: source
+        )
+    }
+
+    private func reload(_ source: AuthSource, allowKeychainInteraction: Bool) -> AuthState? {
+        switch source {
+        case .file(let url):
+            return loadFile(url)
+        case .keychain(let account):
+            return loadKeychain(account: account, allowInteraction: allowKeychainInteraction)
+        }
+    }
+
+    private func keychainAccount(for home: String) -> String {
+        let expanded = (home as NSString).expandingTildeInPath
+        let canonical = URL(fileURLWithPath: expanded).resolvingSymlinksInPath().path
+        let digest = SHA256.hash(data: Data(canonical.utf8))
+        return "cli|" + digest.prefix(8).map { String(format: "%02x", $0) }.joined()
+    }
+
+    // MARK: - Usage
+
+    private func fetchUsageWithOAuth(
+        state initialState: AuthState,
+        isRetry: Bool = false,
+        allowKeychainInteraction: Bool
+    ) async throws -> CodexUsageData {
+        var state = initialState
+
+        if needsRefresh(state.tokens.accessToken),
+           let refreshToken = state.tokens.refreshToken {
+            if let live = reload(state.source, allowKeychainInteraction: allowKeychainInteraction),
+               live.tokens.accessToken != state.tokens.accessToken {
+                state = live
+            } else {
+                state = try await refreshOAuthToken(
+                    state: state,
+                    refreshToken: refreshToken,
+                    allowKeychainInteraction: allowKeychainInteraction
+                )
+            }
+        }
+
+        var request = URLRequest(url: URL(string: "https://chatgpt.com/backend-api/wham/usage")!)
+        request.httpMethod = "GET"
+        request.timeoutInterval = 15
+        request.setValue("Bearer \(state.tokens.accessToken)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("AIUsageBar", forHTTPHeaderField: "User-Agent")
+        if let accountID = state.tokens.accountID, !accountID.isEmpty {
+            request.setValue(accountID, forHTTPHeaderField: "ChatGPT-Account-Id")
+        }
+
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await URLSession.shared.data(for: request)
+        } catch {
+            throw CodexUsageServiceError.networkError(error)
+        }
+        guard let http = response as? HTTPURLResponse else {
+            throw CodexUsageServiceError.networkError(URLError(.badServerResponse))
+        }
+
+        switch http.statusCode {
+        case 200:
+            do {
+                return try JSONDecoder().decode(CodexUsageData.self, from: data)
+            } catch {
+                throw CodexUsageServiceError.decodingError(error)
+            }
+        case 401, 403:
+            if !isRetry, let refreshToken = state.tokens.refreshToken {
+                let refreshed: AuthState
+                if let live = reload(state.source, allowKeychainInteraction: allowKeychainInteraction),
+                   live.tokens.accessToken != state.tokens.accessToken {
+                    refreshed = live
+                } else {
+                    refreshed = try await refreshOAuthToken(
+                        state: state,
+                        refreshToken: refreshToken,
+                        allowKeychainInteraction: allowKeychainInteraction
+                    )
+                }
+                return try await fetchUsageWithOAuth(
+                    state: refreshed,
+                    isRetry: true,
+                    allowKeychainInteraction: allowKeychainInteraction
+                )
+            }
+            throw CodexUsageServiceError.unauthorized
+        default:
+            throw CodexUsageServiceError.invalidResponse(http.statusCode)
+        }
+    }
+
+    private func needsRefresh(_ accessToken: String) -> Bool {
+        guard let expiry = jwtExpiry(accessToken) else { return false }
+        return expiry.timeIntervalSinceNow <= 5 * 60
     }
 
     private func jwtExpiry(_ token: String) -> Date? {
@@ -74,119 +277,127 @@ final class CodexUsageService {
         if remainder != 0 { base64 += String(repeating: "=", count: 4 - remainder) }
         guard let data = Data(base64Encoded: base64),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let exp = json["exp"] as? Double else { return nil }
-        return Date(timeIntervalSince1970: exp)
+              let expiry = (json["exp"] as? NSNumber)?.doubleValue else { return nil }
+        return Date(timeIntervalSince1970: expiry)
     }
 
-    private func isTokenExpired(_ token: String) -> Bool {
-        guard let expiry = jwtExpiry(token) else { return false }
-        return Date() > expiry.addingTimeInterval(-60)
-    }
+    // MARK: - Token refresh
 
-    // MARK: - OAuth
+    private func refreshOAuthToken(
+        state: AuthState,
+        refreshToken: String,
+        allowKeychainInteraction: Bool
+    ) async throws -> AuthState {
+        var request = URLRequest(url: URL(string: "https://auth.openai.com/oauth/token")!)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 15
+        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+        request.httpBody = Data([
+            "grant_type=refresh_token",
+            "client_id=\(oauthClientID.formEncoded)",
+            "refresh_token=\(refreshToken.formEncoded)"
+        ].joined(separator: "&").utf8)
 
-    private func fetchUsageWithOAuth(auth: CodexAuthFile, isRetry: Bool = false) async throws -> CodexUsageData {
-        var accessToken = auth.tokens.accessToken
-        var currentAuth = auth
-
-        if isTokenExpired(accessToken), let refreshToken = auth.tokens.refreshToken {
-            currentAuth = try await refreshOAuthToken(auth: auth, refreshToken: refreshToken)
-            accessToken = currentAuth.tokens.accessToken
-        }
-
-        let accountId = currentAuth.tokens.accountId ?? ""
-        let url = URL(string: "https://chatgpt.com/backend-api/wham/usage")!
-        var req = URLRequest(url: url)
-        req.httpMethod = "GET"
-        req.setValue("Bearer \(accessToken)",  forHTTPHeaderField: "Authorization")
-        req.setValue(accountId,                forHTTPHeaderField: "ChatGPT-Account-Id")
-        req.setValue("application/json",       forHTTPHeaderField: "Accept")
-        req.timeoutInterval = 15
-
-        let (data, response): (Data, URLResponse)
+        let data: Data
+        let response: URLResponse
         do {
-            (data, response) = try await URLSession.shared.data(for: req)
+            (data, response) = try await URLSession.shared.data(for: request)
         } catch {
             throw CodexUsageServiceError.networkError(error)
         }
-
         guard let http = response as? HTTPURLResponse else {
             throw CodexUsageServiceError.networkError(URLError(.badServerResponse))
         }
 
-        switch http.statusCode {
-        case 200:
-            return try JSONDecoder().decode(CodexUsageData.self, from: data)
-        case 401, 403:
-            if !isRetry, let refreshToken = currentAuth.tokens.refreshToken {
-                let refreshed = try await refreshOAuthToken(auth: currentAuth, refreshToken: refreshToken)
-                return try await fetchUsageWithOAuth(auth: refreshed, isRetry: true)
-            }
+        if http.statusCode == 400 || http.statusCode == 401 {
             throw CodexUsageServiceError.unauthorized
-        default:
-            throw CodexUsageServiceError.networkError(URLError(.badServerResponse))
         }
-    }
+        guard (200..<300).contains(http.statusCode) else {
+            throw CodexUsageServiceError.invalidResponse(http.statusCode)
+        }
 
-    // MARK: - Token Refresh
-
-    private func refreshOAuthToken(auth: CodexAuthFile, refreshToken: String) async throws -> CodexAuthFile {
-        let url = URL(string: "https://auth.openai.com/oauth/token")!
-        var req = URLRequest(url: url)
-        req.httpMethod = "POST"
-        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.timeoutInterval = 15
-
-        let body: [String: String] = [
-            "grant_type":    "refresh_token",
-            "refresh_token": refreshToken,
-            "client_id":     oauthClientId
-        ]
-        req.httpBody = try? JSONEncoder().encode(body)
-
-        let (data, response) = try await URLSession.shared.data(for: req)
-        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let accessToken = json["access_token"] as? String,
+              !accessToken.isEmpty else {
             throw CodexUsageServiceError.unauthorized
         }
 
-        struct TokenResponse: Codable {
-            let accessToken:  String
-            let refreshToken: String?
-            enum CodingKeys: String, CodingKey {
-                case accessToken  = "access_token"
-                case refreshToken = "refresh_token"
-            }
+        // A newer CLI login always wins over the refresh that just completed.
+        if let live = reload(state.source, allowKeychainInteraction: allowKeychainInteraction),
+           live.tokens.accessToken != state.tokens.accessToken ||
+           live.tokens.refreshToken != state.tokens.refreshToken {
+            return live
         }
 
-        let tokenResponse = try JSONDecoder().decode(TokenResponse.self, from: data)
-
-        saveUpdatedTokens(
-            accessToken:  tokenResponse.accessToken,
-            refreshToken: tokenResponse.refreshToken ?? refreshToken,
-            accountId:    auth.tokens.accountId
+        var refreshed = state
+        refreshed.tokens.accessToken = accessToken
+        refreshed.tokens.refreshToken = (json["refresh_token"] as? String) ?? refreshToken
+        refreshed.tokens.idToken = (json["id_token"] as? String) ?? state.tokens.idToken
+        persist(
+            refreshed,
+            replacing: state,
+            allowKeychainInteraction: allowKeychainInteraction
         )
-
-        return CodexAuthFile(tokens: .init(
-            accessToken:  tokenResponse.accessToken,
-            refreshToken: tokenResponse.refreshToken ?? refreshToken,
-            accountId:    auth.tokens.accountId
-        ))
+        return refreshed
     }
 
-    private func saveUpdatedTokens(accessToken: String, refreshToken: String, accountId: String?) {
-        let fileURL = URL(fileURLWithPath: authFilePath)
-        guard var raw = (try? Data(contentsOf: fileURL))
-                .flatMap({ try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }) else { return }
-
-        if var tokens = raw["tokens"] as? [String: Any] {
-            tokens["access_token"]  = accessToken
-            tokens["refresh_token"] = refreshToken
-            raw["tokens"] = tokens
-        }
+    private func persist(
+        _ refreshed: AuthState,
+        replacing original: AuthState,
+        allowKeychainInteraction: Bool
+    ) {
+        var raw = original.raw
+        var tokens = raw["tokens"] as? [String: Any] ?? [:]
+        tokens["access_token"] = refreshed.tokens.accessToken
+        tokens["refresh_token"] = refreshed.tokens.refreshToken
+        if let idToken = refreshed.tokens.idToken { tokens["id_token"] = idToken }
+        raw["tokens"] = tokens
         raw["last_refresh"] = ISO8601DateFormatter().string(from: Date())
 
-        if let data = try? JSONSerialization.data(withJSONObject: raw, options: .prettyPrinted) {
-            try? data.write(to: fileURL)
+        guard JSONSerialization.isValidJSONObject(raw),
+              let data = try? JSONSerialization.data(withJSONObject: raw, options: [.prettyPrinted, .sortedKeys])
+        else {
+            print("[CodexUsageService] 無法序列化更新後的 token")
+            return
         }
+
+        do {
+            switch refreshed.source {
+            case .file(let url):
+                guard let live = loadFile(url),
+                      live.tokens.accessToken == original.tokens.accessToken,
+                      live.tokens.refreshToken == original.tokens.refreshToken else {
+                    throw CodexUsageServiceError.credentialsChanged
+                }
+                let permissions = try? FileManager.default.attributesOfItem(atPath: url.path)[.posixPermissions]
+                try data.write(to: url, options: .atomic)
+                if let permissions {
+                    try? FileManager.default.setAttributes([.posixPermissions: permissions], ofItemAtPath: url.path)
+                }
+
+            case .keychain(let account):
+                let context = LAContext()
+                context.interactionNotAllowed = !allowKeychainInteraction
+                let base: [CFString: Any] = [
+                    kSecClass: kSecClassGenericPassword,
+                    kSecAttrService: keychainService,
+                    kSecAttrAccount: account
+                ]
+                var query = base
+                query[kSecUseAuthenticationContext] = context
+                let status = SecItemUpdate(query as CFDictionary, [kSecValueData: data] as CFDictionary)
+                guard status == errSecSuccess else {
+                    throw CodexUsageServiceError.credentialsChanged
+                }
+            }
+        } catch {
+            print("[CodexUsageService] 無法儲存更新後的 token：\(error.localizedDescription)")
+        }
+    }
+}
+
+private extension String {
+    var formEncoded: String {
+        addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? self
     }
 }

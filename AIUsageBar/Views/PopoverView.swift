@@ -41,7 +41,7 @@ struct PopoverView: View {
             Spacer()
 
             // Refresh Button
-            Button(action: { viewModel.refresh() }) {
+            Button(action: { viewModel.refresh(allowKeychainInteraction: true) }) {
                 Image(systemName: "arrow.clockwise")
                     .font(.system(size: 13, weight: .medium))
                     .foregroundColor(.secondary)
@@ -99,7 +99,7 @@ struct PopoverView: View {
                 .multilineTextAlignment(.center)
                 .fixedSize(horizontal: false, vertical: true)
 
-            Button("重試") { viewModel.refresh() }
+            Button("重試") { viewModel.refresh(allowKeychainInteraction: true) }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.small)
         }
